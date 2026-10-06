@@ -44,6 +44,7 @@ private val log = LoggerFactory.getLogger("Application")
 
 fun main() {
     val config = Config.load()
+    org.claudeproxy.proxy.Http.configure(config.anthropicProxy)
     Secrets.init(Crypto(config.masterKey))
     Db.init(config)
 

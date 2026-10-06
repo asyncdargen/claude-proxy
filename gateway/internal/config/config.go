@@ -17,6 +17,8 @@ type Config struct {
 	InternalToken string
 	// UpstreamBaseURL is the Anthropic API base (env UPSTREAM_BASE_URL).
 	UpstreamBaseURL string
+	// AnthropicProxyURL forces Anthropic traffic through an HTTP CONNECT proxy.
+	AnthropicProxyURL string
 	// UpstreamStallTimeout is how long an open stream may go without a single upstream byte
 	// before the relay gives up on it (env UPSTREAM_STALL_SECONDS, 0 disables the watchdog).
 	// Our keep-alive comments make a dead upstream look alive to the client, so without this a
@@ -39,6 +41,7 @@ func Load() *Config {
 		Port:                 envOr("PORT", "9000"),
 		ServiceURL:           envOr("SERVICE_URL", "http://service:8787"),
 		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
+		AnthropicProxyURL:    os.Getenv("ANTHROPIC_PROXY_URL"),
 		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),
 		UpstreamStallTimeout: secondsOr("UPSTREAM_STALL_SECONDS", 120*time.Second),
 		EarlyHeadTimeout:     secondsOr("EARLY_HEAD_SECONDS", 45*time.Second),

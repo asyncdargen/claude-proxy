@@ -58,12 +58,16 @@ class UpstreamForwarder(
     private val log = LoggerFactory.getLogger("UpstreamForwarder")
     private val json = Json { ignoreUnknownKeys = true }
 
-    // Hop-by-hop / auth / identity headers we never forward upstream verbatim.
+    // Hop-by-hop / auth / client-origin headers we never forward upstream verbatim.
     // `x-client-id` is a proxy tell (real Claude Code omits it); the session-id header is
     // re-emitted with a per-account rotated value below.
     private val stripRequestHeaders = setOf(
         "host", "content-length", "transfer-encoding", "connection",
         "authorization", "x-api-key", "accept-encoding",
+        "proxy-authorization", "proxy-authenticate", "cookie", "cookie2",
+        "forwarded", "x-real-ip", "x-client-ip", "x-cluster-client-ip",
+        "x-originating-ip", "x-original-forwarded-for", "cf-connecting-ip",
+        "cf-connecting-ipv6", "true-client-ip", "fastly-client-ip",
         "x-client-id", "x-claude-code-session-id",
     )
     private val stripResponseHeaders = setOf(
@@ -98,7 +102,7 @@ class UpstreamForwarder(
             // copy through client headers except stripped + telemetry ones
             call.request.headers.forEach { name, values ->
                 val ln = name.lowercase()
-                if (ln !in stripRequestHeaders && !RequestRewriter.isTelemetryHeader(ln)) {
+                if (ln !in stripRequestHeaders && !ln.startsWith("x-forwarded-") && !RequestRewriter.isTelemetryHeader(ln)) {
                     values.forEach { v -> header(name, v) }
                 }
             }

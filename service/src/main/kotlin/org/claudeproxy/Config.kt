@@ -1,6 +1,7 @@
 package org.claudeproxy
 
 import java.io.File
+import org.claudeproxy.proxy.AnthropicProxy
 
 /**
  * Runtime configuration, read from environment variables with sane defaults.
@@ -27,6 +28,7 @@ data class Config(
     // Shared secret gating the private /internal/* control API (used by the Go gateway).
     // Null during rollout — the datapath still works without it.
     val internalToken: String?,
+    val anthropicProxy: AnthropicProxy? = null,
 ) {
     companion object {
         fun load(): Config {
@@ -57,6 +59,7 @@ data class Config(
                 databaseUser = env("DATABASE_USER", "claudeproxy")!!,
                 databasePassword = env("DATABASE_PASSWORD", "")!!,
                 internalToken = env("INTERNAL_TOKEN"),
+                anthropicProxy = AnthropicProxy.parse(System.getenv("ANTHROPIC_PROXY_URL") ?: System.getProperty("ANTHROPIC_PROXY_URL")),
             )
         }
 

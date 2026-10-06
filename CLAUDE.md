@@ -12,6 +12,15 @@ saturated, tracks USD cost and rolling-window limits, and ships a React admin UI
 role-based access control. Production shape: a TLS-terminating host proxy (nginx/Caddy, optionally
 behind a CDN) in front of an in-compose nginx router on `127.0.0.1:8080`.
 
+## Anthropic egress
+
+`ANTHROPIC_PROXY_URL` is an optional dedicated HTTP CONNECT proxy shared by Go Anthropic
+transports and the service Anthropic HTTP client (OAuth lifecycle, probes, fallback/chat).
+It never inherits generic proxy environment settings, never falls back to direct when set,
+and does not change internal control routes. Proxy credentials must not
+reach the upstream; Go tests use local CONNECT/origin servers and service tests cover the
+authenticated tunnel. Browser sign-in/telemetry/app updates are not server traffic.
+
 ## Components & URL routing
 
 The app is split into self-contained components fronted by one nginx router (in `docker-compose`,

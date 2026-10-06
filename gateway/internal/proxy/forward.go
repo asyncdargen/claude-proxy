@@ -21,11 +21,15 @@ type forwardResult struct {
 	headSent bool
 }
 
-// Hop-by-hop / auth / identity headers we never forward upstream verbatim. `x-client-id` is a
+// Hop-by-hop / auth / client-origin headers we never forward upstream verbatim. `x-client-id` is a
 // proxy tell (real Claude Code omits it); the session-id header is re-emitted rotated in B5.
 var stripRequestHeaders = map[string]bool{
 	"host": true, "content-length": true, "transfer-encoding": true, "connection": true,
 	"authorization": true, "x-api-key": true, "accept-encoding": true,
+	"proxy-authorization": true, "proxy-authenticate": true, "cookie": true, "cookie2": true,
+	"forwarded": true, "x-real-ip": true, "x-client-ip": true, "x-cluster-client-ip": true,
+	"x-originating-ip": true, "x-original-forwarded-for": true, "cf-connecting-ip": true,
+	"cf-connecting-ipv6": true, "true-client-ip": true, "fastly-client-ip": true,
 	"x-client-id": true, "x-claude-code-session-id": true,
 }
 
@@ -54,7 +58,7 @@ func (h *Handler) forward(
 	// Copy client headers except the strip-set and telemetry headers.
 	for name, vals := range r.Header {
 		ln := strings.ToLower(name)
-		if stripRequestHeaders[ln] || isTelemetryHeader(ln) {
+		if stripRequestHeaders[ln] || strings.HasPrefix(ln, "x-forwarded-") || isTelemetryHeader(ln) {
 			continue
 		}
 		for _, v := range vals {

@@ -32,6 +32,7 @@ dependencies {
     // Ktor client (upstream forwarding)
     implementation("io.ktor:ktor-client-core:$ktorVersion")
     implementation("io.ktor:ktor-client-cio:$ktorVersion")
+    implementation("io.ktor:ktor-client-apache:$ktorVersion")
 
     // Persistence
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")

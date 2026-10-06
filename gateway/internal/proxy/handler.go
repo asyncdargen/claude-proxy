@@ -4,13 +4,12 @@ package proxy
 import (
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
+	"claudeproxy/gateway/internal/egress"
 )
 
 // Handler is the datapath HTTP handler. It resolves each request against the service control
@@ -28,15 +27,8 @@ func NewHandler(cfg *config.Config, ctrl *control.Client) *Handler {
 		cfg:  cfg,
 		ctrl: ctrl,
 		upstream: &http.Client{
-			Transport: &http.Transport{
-				DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 0, // adaptive-thinking Opus can stay silent 30s+ before the head
-				ExpectContinueTimeout: 1 * time.Second,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
+			Transport:     egress.AnthropicTransport(cfg.AnthropicProxyURL),
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }

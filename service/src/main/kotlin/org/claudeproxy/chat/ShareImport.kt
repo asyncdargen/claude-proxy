@@ -95,16 +95,20 @@ object ShareImport {
         )
     }
 
-    private suspend fun get(url: String): String? = Http.client.prepareGet(url) {
-        header("User-Agent", UA)
-        header("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
-        header("Accept-Language", "en-US,en;q=0.9")
-    }.execute { response ->
-        if (response.status.value !in 200..299) {
-            log.debug("share fetch {} -> {}", url, response.status.value)
-            null
-        } else {
-            response.readRawBytes().decodeToString()
+    private suspend fun get(url: String): String? {
+        val host = java.net.URI(url).host.lowercase()
+        val client = if (isHost(host, "claude.ai")) Http.client else Http.publicShareClient
+        return client.prepareGet(url) {
+            header("User-Agent", UA)
+            header("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
+            header("Accept-Language", "en-US,en;q=0.9")
+        }.execute { response ->
+            if (response.status.value !in 200..299) {
+                log.debug("share fetch {} -> {}", url, response.status.value)
+                null
+            } else {
+                response.readRawBytes().decodeToString()
+            }
         }
     }
 

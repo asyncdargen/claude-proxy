@@ -174,6 +174,24 @@ Everything is environment variables, optionally via a local `.env` — see
 `MASTER_KEY` encrypts every stored account credential. **Losing it means losing every stored
 account**, and rotating it invalidates them all. Back it up separately from the database.
 
+### Anthropic outgoing proxy
+
+Set `ANTHROPIC_PROXY_URL=http://proxy.example.com:3128` in the private `.env` and recreate
+**both service and gateway** to route server-side Anthropic requests through an HTTP CONNECT
+proxy. Optional URL-encoded username/password are supported. This covers inference (including
+routing and Kotlin fallback/chat), OAuth token exchange/refresh/profile and limit probes.
+HTTPS upstream certificates are still verified; TLS is tunneled, not decrypted by this proxy.
+
+An empty setting keeps the existing direct route. Invalid configuration fails startup; proxy
+connection/authentication errors do not fall back to direct. Global `HTTP_PROXY`, `HTTPS_PROXY`
+and `NO_PROXY` do not control this dedicated route. Internal control calls keep their existing route. Browser sign-in, telemetry and app updates on developer machines
+are outside this server setting. Known client IP/forwarding headers, cookies and client auth
+are removed before the Go datapath sends the selected account credentials upstream.
+
+Use a trusted proxy: an HTTP proxy observes destination hosts and carries its own Basic
+authentication outside the upstream TLS tunnel. Protect its network connection separately
+(e.g. a private network). This feature does not establish a VPN or a host-wide firewall rule.
+
 ## Security notes
 
 - Never expose `/internal/*` publicly — the bundled nginx config does not route it, and it is

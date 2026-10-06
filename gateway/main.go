@@ -20,6 +20,7 @@ import (
 	"claudeproxy/gateway/internal/anthropicgw"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
+	"claudeproxy/gateway/internal/egress"
 	"claudeproxy/gateway/internal/openaigw"
 	"claudeproxy/gateway/internal/proxy"
 	"claudeproxy/gateway/internal/routing"
@@ -57,6 +58,9 @@ func newMux(cfg *config.Config) *http.ServeMux {
 
 func main() {
 	cfg := config.Load()
+	if _, err := egress.ParseProxy(cfg.AnthropicProxyURL); err != nil {
+		log.Fatal(err)
+	}
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           newMux(cfg),

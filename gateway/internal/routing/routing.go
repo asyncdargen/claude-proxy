@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
+	"claudeproxy/gateway/internal/egress"
 )
 
 // keepAliveInterval bounds how long the relay waits during upstream silence before emitting an
@@ -91,15 +91,8 @@ func NewHandler(cfg *config.Config, ctrl *control.Client, tr Translator) *Handle
 		ctrl: ctrl,
 		tr:   tr,
 		upstream: &http.Client{
-			Transport: &http.Transport{
-				DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 0,
-				ExpectContinueTimeout: 1 * time.Second,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
+			Transport:     egress.AnthropicTransport(cfg.AnthropicProxyURL),
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }

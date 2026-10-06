@@ -41,3 +41,15 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("InternalToken = %q", c.InternalToken)
 	}
 }
+
+func TestDedicatedAnthropicProxyConfig(t *testing.T) {
+	t.Setenv("ANTHROPIC_PROXY_URL", "http://proxy.internal:3128")
+	if Load().AnthropicProxyURL != "http://proxy.internal:3128" {
+		t.Fatal("dedicated proxy override missing")
+	}
+	t.Setenv("ANTHROPIC_PROXY_URL", "")
+	t.Setenv("HTTPS_PROXY", "http://other.internal:8080")
+	if Load().AnthropicProxyURL != "" {
+		t.Fatal("generic proxy env unexpectedly used")
+	}
+}
