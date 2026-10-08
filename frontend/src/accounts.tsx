@@ -14,16 +14,17 @@ export interface AccountApi {
   refreshAll: () => Promise<PoolStats>;
   oauthStart: () => Promise<{ authorizeUrl: string; state: string }>;
   oauthComplete: (b: unknown) => Promise<PoolStats>;
+  oauthReauth: (id: number, b: unknown) => Promise<PoolStats>;
 }
 
 export const globalAccountApi: AccountApi = {
   create: api.createAccount, update: api.updateAccount, remove: api.deleteAccount,
-  refreshOne: api.refreshOne, refreshAll: api.refreshAll, oauthStart: api.oauthStart, oauthComplete: api.oauthComplete,
+  refreshOne: api.refreshOne, refreshAll: api.refreshAll, oauthStart: api.oauthStart, oauthComplete: api.oauthComplete, oauthReauth: api.oauthReauth,
 };
 
 export const personalAccountApi: AccountApi = {
   create: api.createMyAccount, update: api.updateMyAccount, remove: api.deleteMyAccount,
-  refreshOne: api.refreshMyOne, refreshAll: api.refreshMyAll, oauthStart: api.myOauthStart, oauthComplete: api.myOauthComplete,
+  refreshOne: api.refreshMyOne, refreshAll: api.refreshMyAll, oauthStart: api.myOauthStart, oauthComplete: api.myOauthComplete, oauthReauth: api.myOauthReauth,
 };
 
 export type Scope = 'global' | 'personal';
@@ -349,8 +350,8 @@ export function GroupsModal({ groups, onChange, onAccountsChange, onClose }: {
 
 /* ---------------------------------------------------------------- edit modal */
 
-export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }: {
-  a: AccountDto; groups: GroupDto[]; scope: Scope; update: AccountApi['update'];
+export function AccountEditModal({ a, groups, scope, update, accountApi, onClose, onSaved }: {
+  a: AccountDto; groups: GroupDto[]; scope: Scope; update: AccountApi['update']; accountApi?: AccountApi;
   onClose: () => void; onSaved: (s: PoolStats) => void;
 }) {
   const [name, setName] = useState(a.name);
@@ -365,6 +366,20 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const isGlobal = scope === 'global';
+  const [reauthState, setReauthState] = useState<string | null>(null);
+  const [reauthUrl, setReauthUrl] = useState<string | null>(null);
+  const [reauthCode, setReauthCode] = useState('');
+
+  async function startReauth() {
+    if (!accountApi) return; setErr(null);
+    try { const r = await accountApi.oauthStart(); setReauthState(r.state); setReauthUrl(r.authorizeUrl); window.open(r.authorizeUrl, '_blank'); }
+    catch (e: any) { setErr(e.message); }
+  }
+  async function completeReauth() {
+    if (!accountApi || !reauthState) return; setBusy(true); setErr(null);
+    try { onSaved(await accountApi.oauthReauth(a.id, { state: reauthState, code: reauthCode })); }
+    catch (e: any) { setErr(e.message); setBusy(false); }
+  }
 
   async function save() {
     setBusy(true); setErr(null);
@@ -403,6 +418,19 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
         <label className="field"><span>Account UUID (Anthropic account sent in request metadata)<br /><small className="hint">Filled in at login or from the profile; set by hand for tokens without the profile scope.</small></span>
           <input className="mono" value={accountUuid} onChange={(e) => setAccountUuid(e.target.value)} placeholder="not known yet" />
         </label>
+      )}
+      {isOAuth && accountApi && (
+        <div className="field"><span>Login<br /><small className="hint">Redo <b>Login with Claude</b> for this account. Replaces its credentials and keeps its settings and usage history{a.health !== 'OK' ? ' — use this to recover a failed login' : ''}.</small></span>
+          {!reauthState
+            ? <div className="row"><button className="ghost sm" type="button" onClick={startReauth}>Re-authorize</button></div>
+            : <>
+                <p className="hint">If the tab didn't open: <a href={reauthUrl!} target="_blank" rel="noreferrer">open authorize URL</a>. After approving, paste the returned code.</p>
+                <div className="row">
+                  <input value={reauthCode} onChange={(e) => setReauthCode(e.target.value)} placeholder="paste code (or code#state)" />
+                  <button className="sm" type="button" disabled={busy || !reauthCode.trim()} onClick={completeReauth}>{busy ? '…' : 'Complete'}</button>
+                </div>
+              </>}
+        </div>
       )}
       <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
       {err && <div className="err">{err}</div>}

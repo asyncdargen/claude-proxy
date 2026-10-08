@@ -40,7 +40,8 @@ tokens and their own spend limits.
 - **Account types:** OAuth (access + refresh, auto-refreshed in the background), OAuth static
   (access only), API key (`x-api-key`).
 - **Add accounts in the UI** by pasting a credential, or through the **Login with Claude** OAuth
-  (PKCE) flow.
+  (PKCE) flow. A failed OAuth login is fixed in place with **Edit → Re-authorize**, which keeps the
+  account's settings and usage history.
 - **Secrets encrypted at rest** with AES-256-GCM under your `MASTER_KEY`.
 
 **Multi-user**

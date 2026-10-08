@@ -315,6 +315,21 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
             call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
         }
     }
+    post("/accounts/{id}/oauth/complete") {
+        call.requirePermission(Permission.ACCOUNTS_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        val account = pool.get(id)?.takeIf { it.ownerId == null }
+            ?: return@post call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        if (account.type == AccountType.API_KEY) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("API key accounts have no login to redo"))
+        val req = call.receive<OAuthReauthRequest>()
+        try {
+            if (!reauthorizeAccount(id, req, pool, probe)) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid or expired state"))
+            call.respond(buildPoolStats(pool))
+        } catch (e: Exception) {
+            call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
+        }
+    }
 }
 
 // ---- personal accounts (per-user, requires accounts.own.manage) ----
@@ -407,6 +422,20 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
             )
             pool.reload()
             runCatching { probe.probe(id) }
+            call.respond(buildOwnedStats(pool, user.id))
+        } catch (e: Exception) {
+            call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
+        }
+    }
+    post("/my/accounts/{id}/oauth/complete") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(id, user.id)) return@post call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        if (pool.get(id)?.type == AccountType.API_KEY) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("API key accounts have no login to redo"))
+        val req = call.receive<OAuthReauthRequest>()
+        try {
+            if (!reauthorizeAccount(id, req, pool, probe)) return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid or expired state"))
             call.respond(buildOwnedStats(pool, user.id))
         } catch (e: Exception) {
             call.respond(HttpStatusCode.BadGateway, MessageResponse("OAuth exchange failed: ${e.message}"))
@@ -1321,6 +1350,19 @@ private fun io.ktor.server.application.ApplicationCall.rangeParams(): Triple<Int
  */
 private fun io.ktor.server.application.ApplicationCall.zoneParam(): java.time.ZoneId =
     parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
+
+/** Replaces an account's credentials with a fresh "Login with Claude"; false when [req]'s state is unknown or expired. */
+private suspend fun reauthorizeAccount(id: Int, req: OAuthReauthRequest, pool: AccountPool, probe: LimitProbe): Boolean {
+    val verifier = OAuthAddRepo.consume(req.state) ?: return false
+    val (code, stateFromCode) = ClaudeOAuth.splitCode(req.code)
+    val result = ClaudeOAuth.exchangeCode(Http.client, code, verifier, stateFromCode ?: req.state)
+    val secret = AccountSecret(accessToken = result.accessToken, refreshToken = result.refreshToken, expiresAt = result.expiresAtMillis)
+    val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
+    AccountRepo.reauthorize(id, type, secret, accountUuidAtLogin(result))
+    pool.reload()
+    runCatching { probe.probe(id) }
+    return true
+}
 
 /** The token response usually names the account; the profile is the fallback when it doesn't. */
 private suspend fun accountUuidAtLogin(result: ClaudeOAuth.TokenResult): String? =
