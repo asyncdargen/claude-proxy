@@ -55,7 +55,7 @@ export function Dashboard({ user }: { user: UserDto }) {
       )}
 
       {editing && (
-        <AccountEditModal a={editing} groups={groups} scope="global" update={api.updateAccount}
+        <AccountEditModal a={editing} groups={groups} scope="global" update={api.updateAccount} accountApi={globalAccountApi}
           onClose={() => setEditing(null)} onSaved={(s) => { setStats(s); setEditing(null); }} />
       )}
       {adding && (

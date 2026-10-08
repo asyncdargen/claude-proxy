@@ -76,7 +76,7 @@ export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange
       )}
 
       {editing && (
-        <AccountEditModal a={editing} groups={[]} scope="personal" update={api.updateMyAccount}
+        <AccountEditModal a={editing} groups={[]} scope="personal" update={api.updateMyAccount} accountApi={personalAccountApi}
           onClose={() => setEditing(null)} onSaved={(s) => { setStats(s); setEditing(null); }} />
       )}
       {adding && (

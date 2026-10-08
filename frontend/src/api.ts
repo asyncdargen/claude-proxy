@@ -391,6 +391,7 @@ export const api = {
   refreshAll: () => req<PoolStats>('POST', '/api/accounts/refresh-limits'),
   oauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/accounts/oauth/start'),
   oauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/accounts/oauth/complete', b),
+  oauthReauth: (id: number, b: unknown) => req<PoolStats>('POST', `/api/accounts/${id}/oauth/complete`, b),
 
   // personal (per-user) accounts — tried before the global pool, excluded from global stats
   myAccounts: () => req<PoolStats>('GET', '/api/my/accounts'),
@@ -402,6 +403,7 @@ export const api = {
   refreshMyAll: () => req<PoolStats>('POST', '/api/my/accounts/refresh-limits'),
   myOauthStart: () => req<{ authorizeUrl: string; state: string }>('POST', '/api/my/accounts/oauth/start'),
   myOauthComplete: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts/oauth/complete', b),
+  myOauthReauth: (id: number, b: unknown) => req<PoolStats>('POST', `/api/my/accounts/${id}/oauth/complete`, b),
 
   // admin oversight of a user's personal accounts
   userAccounts: (uid: number) => req<PoolStats>('GET', `/api/users/${uid}/accounts`),
