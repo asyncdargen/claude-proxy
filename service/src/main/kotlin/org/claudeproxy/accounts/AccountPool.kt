@@ -192,7 +192,10 @@ class AccountPool {
         // account's current coefficient is frozen into each point so historical ×coef charts are
         // unaffected when the coefficient later changes.
         updated.limit.windows.forEach { (kind, w) ->
-            w.utilization?.let { org.claudeproxy.repo.WindowSnapshotRepo.record(id, kind, it, updated.coefficient) }
+            w.utilization?.let {
+                org.claudeproxy.repo.WindowSnapshotRepo.record(id,kind,it,updated.coefficient,
+                    now=w.updatedAt ?: updated.limit.updatedAt ?: Instant.now(),resetAt=w.resetAt)
+            }
         }
     }
 
