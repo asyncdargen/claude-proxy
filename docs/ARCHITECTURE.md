@@ -57,7 +57,7 @@ back. They never touch the database.
 - `TokenRefresher` refreshes OAuth access tokens in the background. A failed refresh parks the
   account for 30 min, doubling up to 6 h; an `invalid_grant` (expired/revoked refresh token) goes
   straight to the 6 h cap, since only a fresh "Login with Claude" can fix it. Re-authorizing the
-  account (a new refresh token) clears the wait at once. `LimitScheduler`/`LimitProbe`
+  account (**Edit → Re-authorize**, which stores a new refresh token) clears the wait at once. `LimitScheduler`/`LimitProbe`
   periodically probe accounts to keep window state fresh even when idle.
 
 ## Data model (Exposed, `db/Tables.kt`)

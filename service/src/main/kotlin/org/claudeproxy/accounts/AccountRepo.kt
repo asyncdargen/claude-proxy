@@ -261,6 +261,19 @@ object AccountRepo {
         }
     }
 
+    /** Swap in the credentials from a fresh login on an existing account, keeping its id, config and usage history. */
+    fun reauthorize(id: Int, type: AccountType, secret: AccountSecret, accountUuid: String?) = transaction {
+        Accounts.update({ Accounts.id eq id }) {
+            it[Accounts.type] = type.name
+            it[health] = AccountHealth.OK.name
+            if (accountUuid != null) it[Accounts.accountUuid] = accountUuid
+        }
+        AccountSecrets.upsert {
+            it[accountId] = id
+            it[cipherBlob] = Secrets.encode(secret)
+        }
+    }
+
     fun updateHealth(id: Int, health: AccountHealth) = transaction {
         Accounts.update({ Accounts.id eq id }) { it[Accounts.health] = health.name }
     }

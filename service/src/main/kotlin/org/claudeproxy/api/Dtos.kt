@@ -55,6 +55,9 @@ data class OAuthCompleteRequest(
 )
 
 @Serializable
+data class OAuthReauthRequest(val state: String, val code: String)
+
+@Serializable
 data class CreateUserRequest(
     val username: String,
     val password: String,
