@@ -4,6 +4,7 @@ import org.claudeproxy.accounts.AccountPool
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.accounts.RateLimitHeaders
+import org.claudeproxy.accounts.RateLimitPolicy
 import org.claudeproxy.api.CandidateDto
 import org.claudeproxy.api.UsageReport
 import org.claudeproxy.cache.MemoryCache
@@ -47,6 +48,8 @@ data class ResolveResult(
     // the request is on a free path (token counting, model listing): no quota, no limit, and a
     // successful zero-token outcome is not recorded as usage.
     val free: Boolean = false,
+    // empty plan because every account in reach is parked: seconds until the earliest one frees up.
+    val retryAfterSeconds: Long? = null,
 )
 
 /**
@@ -114,7 +117,16 @@ class DatapathService(private val pool: AccountPool) {
         // An empty plan becomes a 503 at the gateway and records no usage at all — without this
         // line the failure leaves no trace anywhere, neither in the log nor in the stats.
         if (order.isEmpty() && !overLimit) logNoCandidate(userId, source)
-        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel)
+        // Pool empty because accounts are parked: tell the gateway when to come back, so the
+        // client gets a 429 + Retry-After instead of a 503 that reads like an outage.
+        val retryAfter = if (order.isEmpty() && !overLimit) {
+            // Only a parked account comes back at a known instant; anything else (no access to
+            // the pool, lost credentials) stays a 503.
+            if (pool.availability(userId, allowedGroups).rateLimited > 0) pool.earliestReset()?.let {
+                maxOf(1L, java.time.Duration.between(Instant.now(), it).seconds)
+            } else null
+        } else null
+        return ResolveResult(userId, tokenId, null, overLimit, costLimit, usedCost, order.map { it.toCandidate() }, sysPrompt, forcedModel, retryAfterSeconds = retryAfter)
     }
 
     /** Why the pool had nothing to offer, per account in the user's reach. */
@@ -171,16 +183,12 @@ class DatapathService(private val pool: AccountPool) {
 
         when {
             o.status == 429 -> {
-                // Park the account: honor retry-after; else park to the window reset only when
-                // genuinely at the limit (util ~full), otherwise a short burst-limit backoff.
-                val retryAfter = resetInstantFrom(headers)
-                val maxUtil = newLimit.windows.values.mapNotNull { it.utilization }.maxOrNull() ?: 0.0
-                val until = when {
-                    retryAfter != null -> retryAfter
-                    maxUtil >= 0.95 -> newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
-                    else -> Instant.now().plusSeconds(60)
-                }
-                pool.markRateLimited(o.accountId, until)
+                // Park the account only when its own windows say it is spent; a per-model or
+                // burst 429 goes back to the client alone (see RateLimitPolicy).
+                val until = RateLimitPolicy.parkUntil(headers, newLimit)
+                log.warn("upstream 429 acct#{} model={} user={} -> {}; headers: {}", o.accountId, o.model, o.userId,
+                    until?.let { "park until $it" } ?: "not parked (model/burst limit)", RateLimitPolicy.describe(headers))
+                if (until != null) pool.markRateLimited(o.accountId, until)
             }
             o.status == 401 -> {
                 pool.setHealth(o.accountId, AccountHealth.REFRESH_FAILED)
@@ -235,11 +243,6 @@ class DatapathService(private val pool: AccountPool) {
         return maxOf(1L, java.time.Duration.between(Instant.now(), nextMidnight).seconds)
     }
 
-    private fun resetInstantFrom(headers: Map<String, String>): Instant? {
-        val retryAfter = headers.entries.firstOrNull { it.key.equals("retry-after", true) }?.value
-        retryAfter?.trim()?.toLongOrNull()?.let { return Instant.now().plusSeconds(it) }
-        return null
-    }
 
     companion object {
         private val freePathRe = Regex("""/v1/(messages/count_tokens|models(/[^/]+)?)/?""")

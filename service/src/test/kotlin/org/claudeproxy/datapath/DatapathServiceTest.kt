@@ -88,6 +88,38 @@ class DatapathServiceTest {
         assertTrue(runCatching { ProxyTokenRepo.normalizeModel("a".repeat(129)) }.isFailure)
     }
 
+    private fun accId() = org.jetbrains.exposed.sql.transactions.transaction {
+        org.claudeproxy.db.Accounts.selectAll().first()[org.claudeproxy.db.Accounts.id]
+    }
+
+    private fun limitHeaders(util5h: String, status5h: String) = mapOf(
+        "anthropic-ratelimit-unified-5h-utilization" to util5h,
+        "anthropic-ratelimit-unified-5h-status" to status5h,
+        "anthropic-ratelimit-unified-5h-reset" to (java.time.Instant.now().epochSecond + 3600).toString(),
+    )
+
+    /** A per-model 429 (haiku at 29% of the 5h window) must leave the account serving other models. */
+    @Test
+    fun `a model-scoped 429 keeps the account in rotation`() = runBlocking {
+        val svc = DatapathService(pool)
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId(), userId = adminId, status = 429,
+            model = "claude-haiku-5-5", ratelimitHeaders = limitHeaders("0.29", "allowed")))
+        val r = svc.resolve(seededToken, "POST", "/v1/messages")
+        assertTrue(r.candidates.isNotEmpty(), "account must stay a candidate")
+        assertEquals(null, r.retryAfterSeconds)
+    }
+
+    @Test
+    fun `an exhausted-window 429 parks the account and resolve reports retry-after`() = runBlocking {
+        val svc = DatapathService(pool)
+        svc.applyOutcome(org.claudeproxy.api.UsageReport(accountId = accId(), userId = adminId, status = 429,
+            model = "claude-opus-5-5", ratelimitHeaders = limitHeaders("1.0", "rejected")))
+        val r = svc.resolve(seededToken, "POST", "/v1/messages")
+        assertTrue(r.candidates.isEmpty())
+        val secs = r.retryAfterSeconds
+        assertTrue(secs != null && secs in 3000..3600, "retry-after = $secs")
+    }
+
     @Test
     fun `resolve returns BAD_TOKEN for unknown token`() = runBlocking {
         val r = DatapathService(pool).resolve("cxp_nope", "POST", "/v1/messages")

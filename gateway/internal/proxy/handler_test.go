@@ -95,6 +95,34 @@ func TestHandlerNoCandidatesIs503(t *testing.T) {
 	}
 }
 
+// Parked accounts are a rate limit, not an outage: 429 with Retry-After so clients back off.
+func TestHandlerParkedPoolIs429WithRetryAfter(t *testing.T) {
+	control_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/resolve" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"userId":1,"overLimit":false,"candidates":[],"retryAfterSeconds":42}`)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer control_.Close()
+
+	h := NewHandler(&config.Config{UpstreamBaseURL: "http://unused"}, control.New(control_.URL, "tok"))
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer cxp_token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 429 {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "42" {
+		t.Errorf("Retry-After = %q, want 42", got)
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limit_error") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+}
+
 func TestHandlerOverLimitIs429(t *testing.T) {
 	control_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/resolve" {

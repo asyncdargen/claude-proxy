@@ -3,8 +3,10 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"claudeproxy/gateway/internal/config"
@@ -76,7 +78,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"Daily spend limit reached; resets at 00:00 UTC. Add a personal account to keep working.")
 			return
 		}
-		writeProxyError(w, http.StatusServiceUnavailable, "rate_limit_error", "No account is available for this token")
+		if resp.RetryAfterSeconds > 0 {
+			// Accounts exist but are parked on their limits: that is a rate limit, not an outage.
+			w.Header().Set("Retry-After", strconv.FormatInt(resp.RetryAfterSeconds, 10))
+			writeProxyError(w, http.StatusTooManyRequests, "rate_limit_error",
+				fmt.Sprintf("All accounts are rate-limited; retry in %ds", resp.RetryAfterSeconds))
+			return
+		}
+		writeProxyError(w, http.StatusServiceUnavailable, "overloaded_error", "No account is available for this token")
 		return
 	}
 

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,7 +148,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"Daily routing spend limit reached; resets at 00:00 UTC.")
 			return
 		}
-		h.tr.WriteError(w, http.StatusServiceUnavailable, "rate_limit_error", "No account is available for routing")
+		if resp.RetryAfterSeconds > 0 {
+			w.Header().Set("Retry-After", strconv.FormatInt(resp.RetryAfterSeconds, 10))
+			h.tr.WriteError(w, http.StatusTooManyRequests, "rate_limit_error",
+				fmt.Sprintf("All accounts are rate-limited; retry in %ds", resp.RetryAfterSeconds))
+			return
+		}
+		h.tr.WriteError(w, http.StatusServiceUnavailable, "overloaded_error", "No account is available for routing")
 		return
 	}
 

@@ -40,6 +40,7 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                         systemPrompt = r.systemPrompt,
                         defaultModel = r.defaultModel,
                         free = r.free,
+                        retryAfterSeconds = r.retryAfterSeconds,
                     ),
                 )
             }

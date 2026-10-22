@@ -42,6 +42,9 @@ type ResolveResp struct {
 	// Free marks a path that consumes no subscription quota (token counting, model listing).
 	// Echoed back on the usage report so the service can keep zero-token successes out of stats.
 	Free bool `json:"free"`
+	// RetryAfterSeconds is set when Candidates is empty because every reachable account is
+	// parked: seconds until the earliest one frees up. Zero = no account at all.
+	RetryAfterSeconds int64 `json:"retryAfterSeconds"`
 	// Client-side only: the id this resolve announced to the service, to be handed back to
 	// EndSession when the request finishes. Not part of the wire response.
 	SessionID string `json:"-"`

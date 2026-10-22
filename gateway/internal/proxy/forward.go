@@ -47,7 +47,7 @@ func (h *Handler) forward(
 	cand control.Candidate, cands []control.Candidate, idx int, userID, tokenID *int,
 	body []byte, canRetry, headSent bool,
 ) forwardResult {
-	outBody, sessionID := rewriteBody(body, cand.DeviceID, cand.AccountUUID, r.Header.Get("X-Claude-Code-Session-Id"))
+	outBody, sessionID := rewriteBody(ensureClaudeCodeSystem(body, cand.Type, r.URL.Path), cand.DeviceID, cand.AccountUUID, r.Header.Get("X-Claude-Code-Session-Id"))
 
 	url := h.cfg.UpstreamBaseURL + r.URL.RequestURI()
 	req, err := http.NewRequestWithContext(ctx, r.Method, url, strings.NewReader(string(outBody)))

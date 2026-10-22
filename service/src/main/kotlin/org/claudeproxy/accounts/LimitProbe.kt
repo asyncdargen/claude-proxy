@@ -76,7 +76,14 @@ class LimitProbe(
             val observed = headerMap.keys.any { it.lowercase().startsWith("anthropic-ratelimit") }
             if (newLimit !== prev) pool.updateLimit(accountId, newLimit)
             when (resp.status.value) {
-                429 -> pool.markRateLimited(accountId, newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull())
+                // Same rule as live traffic: a per-model/burst 429 on the probe model must not
+                // take the whole account out of rotation until the window reset.
+                429 -> {
+                    val until = RateLimitPolicy.parkUntil(headerMap, newLimit)
+                    log.warn("Probe for account {} returned 429 -> {}; headers: {}", accountId,
+                        until?.let { "park until $it" } ?: "not parked (model/burst limit)", RateLimitPolicy.describe(headerMap))
+                    if (until != null) pool.markRateLimited(accountId, until)
+                }
                 401, 403 -> {
                     // Token no longer accepted. Try to recover OAuth accounts; otherwise flag lost access.
                     log.warn("Probe for account {} returned {} (lost access)", accountId, resp.status.value)

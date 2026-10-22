@@ -61,6 +61,9 @@ data class ResolveResponse(
     // free path (token counting, model listing): the gateway echoes this back on the usage
     // report so a successful zero-token attempt stays out of the statistics.
     val free: Boolean = false,
+    // empty candidates because the reachable accounts are parked: seconds until one frees up.
+    // The gateway answers 429 + Retry-After for it; null keeps the 503 "no account" answer.
+    val retryAfterSeconds: Long? = null,
 )
 
 /**

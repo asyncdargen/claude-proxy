@@ -142,14 +142,11 @@ class UpstreamForwarder(
                 // Park until retry-after if given; else, only until the window reset when the
                 // account is genuinely at its window limit (utilization ~full). A 429 at low
                 // utilization is a short burst limit — park briefly so we retry soon.
-                val retryAfter = resetInstantFrom(headerMap)
-                val maxUtil = newLimit.windows.values.mapNotNull { it.utilization }.maxOrNull() ?: 0.0
-                val until = when {
-                    retryAfter != null -> retryAfter
-                    maxUtil >= 0.95 -> newLimit.windows.values.mapNotNull { it.resetAt }.minOrNull()
-                    else -> Instant.now().plusSeconds(60)
-                }
-                pool.markRateLimited(account.id, until)
+                val until = org.claudeproxy.accounts.RateLimitPolicy.parkUntil(headerMap, newLimit)
+                log.warn("upstream 429 acct#{} -> {}; headers: {}", account.id,
+                    until?.let { "park until $it" } ?: "not parked (model/burst limit)",
+                    org.claudeproxy.accounts.RateLimitPolicy.describe(headerMap))
+                if (until != null) pool.markRateLimited(account.id, until)
                 if (canRetry) {
                     runCatching { response.readRawBytes() }
                     UsageRepo.record(account.id, userId, BilledUsage(), status.value, null, tokenId = tokenId)
@@ -333,11 +330,6 @@ class UpstreamForwarder(
         org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret)
     }
 
-    private fun resetInstantFrom(headers: Map<String, String>): Instant? {
-        val retryAfter = headers.entries.firstOrNull { it.key.equals("retry-after", true) }?.value
-        retryAfter?.trim()?.toLongOrNull()?.let { return Instant.now().plusSeconds(it) }
-        return null
-    }
 
     private fun modelFromRequest(bodyBytes: ByteArray): String? = try {
         if (bodyBytes.isEmpty()) null
