@@ -45,6 +45,36 @@ export interface ModelPrice {
   webSearchPrice: number;
 }
 
+/** Fractions of ONE account quota, not shares of the spent portion. */
+export interface AttributionContributor {
+  key: string;
+  userId: number | null;
+  username: string;
+  amount: number;
+  method: 'cost' | 'tokens' | 'unattributed';
+}
+export interface AttributionPoint { ts: string; total: number; values: Record<string, number>; }
+export interface AttributionPeriod {
+  id: string;
+  startAt: string;
+  endAt: string | null;
+  current: boolean;
+  estimatedBounds: boolean;
+  partial: boolean;
+  observedAt: string;
+  total: number;
+  points: AttributionPoint[];
+  contributors: AttributionContributor[];
+}
+export interface AttributionWindow { kind: '5h' | '7d'; periods: AttributionPeriod[]; }
+export interface AttributionAccount {
+  accountId: number;
+  accountName: string;
+  provider: string;
+  windows: AttributionWindow[];
+}
+export interface WindowAttribution { generatedAt: string; accounts: AttributionAccount[]; }
+
 export interface WindowLimitDto {
   usageFraction: number | null;
   remaining: number | null;
@@ -368,7 +398,7 @@ export function localTz(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
 }
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   // X-Requested-With: the server's CSRF guard on body-less state changes (offboard, unlink)
   // requires it; a cross-site page cannot send it without a CORS preflight the server refuses.
   const headers: Record<string, string> = { 'X-Requested-With': 'claude-proxy' };
@@ -378,6 +408,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     credentials: 'include',
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
@@ -463,6 +494,8 @@ export const api = {
   updateRoutingTokenPrompt: (id: number, systemPrompt: string | null) =>
     req<ProxyTokenDto[]>('PATCH', `/api/routing-tokens/${id}`, { systemPrompt }),
 
+  windowAttribution: (days = 30, signal?: AbortSignal) =>
+    req<WindowAttribution>('GET', `/api/stats/window-attribution${qs({ days })}`, undefined, signal),
   statsSummary: () => req<UsageSummary[]>('GET', '/api/stats/summary'),
   statsRecent: () => req<UsageEvent[]>('GET', '/api/stats/recent'),
   // `tz` makes the "today" half of the breakdown the viewer's day, matching the charts.

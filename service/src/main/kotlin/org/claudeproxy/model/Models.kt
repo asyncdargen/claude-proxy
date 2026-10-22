@@ -17,6 +17,7 @@ enum class Permission {
     STATS_VIEW_ACCOUNTS,// may see which account each request/stat came from
     ACCOUNTS_VIEW,      // may view upstream accounts + their limits
     STATS_VIEW,         // full statistics (implies recent + accounts + graphs)
+    STATS_VIEW_WINDOW_ATTRIBUTION, // named users' shared-account quota estimates; independent of STATS_VIEW
     ACCOUNTS_MANAGE,    // may create/edit/delete upstream accounts
     USERS_MANAGE,       // may create/edit/delete users and roles
     ADMIN;              // superuser: implies everything

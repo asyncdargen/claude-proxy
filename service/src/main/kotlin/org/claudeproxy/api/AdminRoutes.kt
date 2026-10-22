@@ -89,6 +89,7 @@ fun Route.adminRoutes(
         proxyTokenRoutes()
         routingTokenRoutes()
         statsRoutes(pool)
+        windowAttributionRoutes()
         chatRoutes(pool, chatEngine, datapath, upstreamBaseUrl)
     }
 }

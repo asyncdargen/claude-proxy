@@ -25,7 +25,7 @@ interface NavDef {
 
 const NAV: NavDef[] = [
   { path: '/chat', label: 'Chat', icon: 'chat', perm: 'CHAT_USE' },
-  { path: '/dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'ACCOUNTS_VIEW' },
+  { path: '/dashboard', label: 'Dashboard', icon: 'dashboard', anyPerm: ['ACCOUNTS_VIEW', 'STATS_VIEW_WINDOW_ATTRIBUTION'] },
   { path: '/my/accounts', label: 'My Accounts', icon: 'accounts', perm: 'ACCOUNTS_OWN_MANAGE' },
   { path: '/my/stats', label: 'My Stats', icon: 'mystats', perm: 'STATS_VIEW_OWN' },
   { path: '/stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
@@ -174,7 +174,7 @@ function Shell({ user, setUser }: { user: UserDto; setUser: (u: UserDto | null) 
           <Routes>
             <Route path="/chat" element={<RequirePerm user={user} perm="CHAT_USE"><Chat onOpenNav={() => setDrawerOpen(true)} /></RequirePerm>} />
             <Route path="/chat/:id" element={<RequirePerm user={user} perm="CHAT_USE"><Chat onOpenNav={() => setDrawerOpen(true)} /></RequirePerm>} />
-            <Route path="/dashboard" element={<RequirePerm user={user} perm="ACCOUNTS_VIEW"><Dashboard user={user} /></RequirePerm>} />
+            <Route path="/dashboard" element={<RequirePerm user={user} anyPerm={['ACCOUNTS_VIEW', 'STATS_VIEW_WINDOW_ATTRIBUTION']}><Dashboard user={user} /></RequirePerm>} />
             <Route path="/my/accounts" element={<RequirePerm user={user} perm="ACCOUNTS_OWN_MANAGE"><MyAccounts user={user} onUserChange={setUser} /></RequirePerm>} />
             <Route path="/my/stats" element={<RequirePerm user={user} perm="STATS_VIEW_OWN"><MyStats canReset={has(user, 'STATS_RESET_OWN')} /></RequirePerm>} />
             <Route path="/stats" element={<RequirePerm user={user} anyPerm={['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS']}><Stats user={user} /></RequirePerm>} />

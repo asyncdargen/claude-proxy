@@ -51,6 +51,7 @@ object Db {
             seedRoles()
             migrateGlobalPoolPermission()
             migrateChatPermission()
+            migrateWindowAttributionPermission()
             migrateWindowSnapshotCoefficient()
             seedAdmin(config)
         }
@@ -71,7 +72,8 @@ object Db {
             "viewer" to listOf(Permission.ACCOUNTS_VIEW, Permission.STATS_VIEW, Permission.STATS_VIEW_OWN),
             "user" to listOf(Permission.PROXY_USE, Permission.STATS_VIEW_OWN, Permission.ACCOUNTS_OWN_MANAGE, Permission.ACCOUNTS_ORDER_TOGGLE, Permission.POOL_GLOBAL_USE, Permission.ROUTING_USE, Permission.CHAT_USE),
         )
-        defaults.forEach { (roleName, perms) ->
+        defaults.forEach { (roleName, defaultsForRole) ->
+            val perms = (defaultsForRole + Permission.STATS_VIEW_WINDOW_ATTRIBUTION).distinct()
             val exists = Roles.select(Roles.id).where { Roles.name eq roleName }.any()
             if (exists) return@forEach
             val roleId = Roles.insert { it[name] = roleName }[Roles.id]
@@ -84,12 +86,24 @@ object Db {
         }
     }
 
-    /**
-     * One-time backfill for the new POOL_GLOBAL_USE permission: any role that could already
-     * reach the shared pool (i.e. has PROXY_USE) keeps that ability explicitly. Recorded in the
-     * settings table so it truly runs once — re-running on every start would resurrect the
-     * permission after an admin removes it.
-     */
+    /** One-time opt-out grant of named-user window estimates to every existing role. */
+    private fun migrateWindowAttributionPermission() {
+        // Every existing role, including custom roles, gets the permission once. Revocations persist.
+        val markerKey = "migrated:window_attribution"
+        if (Settings.selectAll().where { Settings.key eq markerKey }.any()) return
+        Roles.selectAll().map { it[Roles.id] }.forEach { rid ->
+            RolePermissions.insertIgnore {
+                it[roleId] = rid
+                it[permission] = Permission.STATS_VIEW_WINDOW_ATTRIBUTION.name
+            }
+        }
+        Settings.insert {
+            it[key] = markerKey
+            it[value] = Instant.now().toString()
+        }
+    }
+
+    /** Preserve shared pool access once for roles already holding PROXY_USE. */
     private fun migrateGlobalPoolPermission() {
         val markerKey = "migrated:pool_global_use"
         val done = Settings.selectAll().where { Settings.key eq markerKey }.any()

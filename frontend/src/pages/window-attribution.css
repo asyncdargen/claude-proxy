@@ -1,0 +1,26 @@
+.attribution-block { margin: 26px 0; }
+.attribution-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.attribution-card { min-width: 0; margin-bottom: 0; }
+.attribution-card h3 { margin: 0; font-size: 20px; }
+.attribution-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.attribution-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; }
+.attribution-field select { max-width: 100%; min-width: 0; }
+.attribution-account { max-width: 420px; margin: 16px 0; }
+.attribution-total { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin: 18px 0 8px; font-variant-numeric: tabular-nums; }
+.attribution-total strong { font-size: 28px; letter-spacing: -.02em; }
+.attribution-total span { color: var(--muted); font-size: 12px; }
+.attribution-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.attribution-contributors { list-style: none; padding: 0; margin: 16px 0 0; font-size: 12px; }
+.attribution-contributors li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
+.attribution-contributors li > span { min-width: 0; overflow-wrap: anywhere; }
+.attribution-contributors strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.attribution-empty { min-height: 160px; display: grid; place-content: center; }
+.attribution-chart { position: relative; margin-top: 16px; }
+.attribution-chart svg { display: block; }
+.attribution-scrubber input { padding: 0; width: 100%; accent-color: var(--accent); }
+.attribution-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; }
+.attribution-tooltip { position: absolute; z-index: 2; top: 0; right: 8px; max-width: calc(100% - 16px); max-height: 200px; overflow: auto; padding: 10px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--panel-2); box-shadow: var(--shadow); font-size: 12px; }
+.attribution-tooltip-row { display: flex; justify-content: space-between; gap: 16px; }
+.attribution-tooltip-row span { overflow-wrap: anywhere; }
+.attribution-tooltip-row strong { white-space: nowrap; }
+@media (max-width: 800px) { .attribution-grid { grid-template-columns: minmax(0, 1fr); } }

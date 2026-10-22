@@ -219,6 +219,8 @@ object UsageEvents : Table("usage_events") {
     // "routing" → routing_tokens.id); null = pre-migration rows or token-less attempts.
     val tokenId = integer("token_id").nullable()
     override val primaryKey = PrimaryKey(id)
+    // Range reads per account (window attribution).
+    init { index(false, accountId, ts) }
 }
 
 /**
@@ -250,6 +252,8 @@ object WindowSnapshots : Table("window_snapshots") {
     // current coefficient at startup (see Db.migrateWindowSnapshotCoefficient), and always
     // written for new rows.
     val coefficient = double("coefficient").nullable()
+    // Actual observed reset only; legacy rows intentionally stay NULL.
+    val resetAt = timestamp("reset_at").nullable()
     val ts = timestamp("ts")
     override val primaryKey = PrimaryKey(id)
     init { index(false, accountId, windowKind, ts) }
