@@ -326,3 +326,24 @@ func TestTranslateCacheControl(t *testing.T) {
 		t.Fatalf("tail message block must be a cache breakpoint")
 	}
 }
+
+func TestTranslateDropsWhatOpus55Rejects(t *testing.T) {
+	// Opus 5.5 answers temperature/top_p and a forced tool_choice with a 400.
+	ar := mustTranslate(t, `{"model":"x","messages":[{"role":"user","content":"x"}],"temperature":0.2,"top_p":0.9,
+		"tools":[{"type":"function","function":{"name":"f","parameters":{}}}],"tool_choice":"required"}`, "claude-opus-5-5")
+	if ar.Temperature != nil || ar.TopP != nil {
+		t.Fatalf("sampling params must be dropped, got %v / %v", ar.Temperature, ar.TopP)
+	}
+	var tc map[string]any
+	_ = json.Unmarshal(ar.ToolChoice, &tc)
+	if tc["type"] != "auto" {
+		t.Fatalf("forced tool_choice must fall back to auto, got %v", tc)
+	}
+	// Opus 5 still takes a forced tool_choice.
+	o5 := mustTranslate(t, `{"model":"x","messages":[{"role":"user","content":"x"}],
+		"tools":[{"type":"function","function":{"name":"f","parameters":{}}}],"tool_choice":{"type":"function","function":{"name":"f"}}}`, "claude-opus-5")
+	_ = json.Unmarshal(o5.ToolChoice, &tc)
+	if tc["type"] != "tool" {
+		t.Fatalf("Opus 5 keeps the named tool_choice, got %v", tc)
+	}
+}

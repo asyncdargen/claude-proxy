@@ -220,7 +220,7 @@ func (h *Handler) forward(
 		req.Header.Set("Content-Type", "application/json")
 		req.ContentLength = int64(len(body))
 	}
-	ccident.SetClientHeaders(req.Header, h.cfg.ClaudeCodeUserAgent, sessionID)
+	ccident.SetClientHeaders(req.Header, ccident.UserAgent(h.cfg.ClaudeCodeUserAgent), sessionID)
 	// Per-account upstream credentials (already decrypted by the service). Merge anthropic-beta
 	// with any client-provided values so client betas (e.g. context-management, prompt-caching)
 	// survive alongside the account's oauth beta.

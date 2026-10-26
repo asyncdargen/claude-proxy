@@ -223,7 +223,10 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   (`ccident.StampUserID` + `SetClientHeaders`), chat and the limit probe (`ClaudeCodeClient`) —
   get the whole blob plus CC's `User-Agent` (`CLAUDE_CODE_USER_AGENT`), `x-app: cli` and a
   session id stable per (token/user, account, UTC day). Never on `count_tokens`: it rejects
-  `metadata`.
+  `metadata`. Anthropic gates new models on that CLI version (an old
+  `claude-cli/x.y.z` gets "Claude Code is outdated"), so the Go gateway adopts the newest
+  `claude-cli` user agent that just succeeded on the proxy datapath (`ccident.UserAgent`) whenever it
+  is ahead of the configured one; the service side (chat, probe) only has the env/default.
 - **Free paths** (`count_tokens`, `/v1/models`): no quota, no daily limit, and the resolve returns
   the *whole* try-list (`AccountPool.selectAnyOrder`) so one unhealthy account can't break Claude
   Code's context indicator. `ResolveResponse.free` rides back on the usage report: a **successful

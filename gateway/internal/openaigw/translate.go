@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"claudeproxy/gateway/internal/ccident"
+	"claudeproxy/gateway/internal/models"
 )
 
 // ---- OpenAI Chat Completions wire types (the subset we translate) ----
@@ -98,8 +99,11 @@ func translateRequest(req *chatRequest, model string) ([]byte, error) {
 		out.MaxTokens = *req.MaxCompletionTokens
 	}
 	// OpenAI temperature is [0,2]; Anthropic rejects >1. Clamp so valid OpenAI requests survive.
-	out.Temperature = clampTemperature(req.Temperature)
-	out.TopP = req.TopP
+	// Newer models reject sampling parameters outright, so there they are dropped instead.
+	if models.SamplingParams(model) {
+		out.Temperature = clampTemperature(req.Temperature)
+		out.TopP = req.TopP
+	}
 	out.StopSequences = parseStop(req.Stop)
 
 	var systemParts []string
@@ -155,6 +159,10 @@ func translateRequest(req *chatRequest, model string) ([]byte, error) {
 		})
 	}
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
+	if !models.ForcedToolChoice(model) && isForcedToolChoice(out.ToolChoice) {
+		// The model would 400 the forced form; "auto" with tools on offer is the closest it takes.
+		out.ToolChoice = json.RawMessage(`{"type":"auto"}`)
+	}
 
 	// Prompt-cache breakpoints. This datapath builds the Anthropic body from scratch, so unless we
 	// set cache_control here no breakpoint ever reaches Anthropic and routed traffic can never hit
@@ -364,6 +372,13 @@ func translateToolChoice(raw json.RawMessage) json.RawMessage {
 		return b
 	}
 	return nil
+}
+
+func isForcedToolChoice(raw json.RawMessage) bool {
+	var tc struct {
+		Type string `json:"type"`
+	}
+	return len(raw) > 0 && json.Unmarshal(raw, &tc) == nil && (tc.Type == "any" || tc.Type == "tool")
 }
 
 // finishReasonFor maps an Anthropic stop_reason to an OpenAI finish_reason.

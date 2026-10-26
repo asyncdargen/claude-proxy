@@ -88,13 +88,25 @@ class ChatPromptTest {
         assertNull(plain["tools"])
 
         val rich = ChatPrompt.body(
-            "claude-opus-5", ChatPrompt.systemBlocks(), listOf(ChatPrompt.Turn("user", "hi")),
+            "claude-haiku-4-5-20251001", ChatPrompt.systemBlocks(), listOf(ChatPrompt.Turn("user", "hi")),
             webSearch = true, thinking = true,
         )
         val budget = (rich["thinking"] as JsonObject)["budget_tokens"]!!.jsonPrimitive.int
         val maxTokens = rich["max_tokens"]!!.jsonPrimitive.int
         assertTrue(maxTokens > budget, "max_tokens must leave room for the answer after the thinking budget")
         assertEquals("web_search_20250305", rich["tools"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `current models get adaptive thinking, never a budget they would 400`() {
+        for (model in listOf("claude-opus-5-5", "claude-opus-5", "claude-opus-4-7", "claude-sonnet-5-5", "claude-fable-5-1", "claude-sonnet-4-6")) {
+            val t = ChatPrompt.body(model, ChatPrompt.systemBlocks(), listOf(ChatPrompt.Turn("user", "hi")), thinking = true)["thinking"] as JsonObject
+            assertEquals("adaptive", t["type"]!!.jsonPrimitive.content, model)
+            assertNull(t["budget_tokens"], model)
+        }
+        for (model in listOf("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929", "claude-opus-4-20250514", "claude-3-7-sonnet-20250219")) {
+            assertFalse(ChatPrompt.adaptiveThinking(model), model)
+        }
     }
 
     /**

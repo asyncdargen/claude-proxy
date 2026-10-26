@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"claudeproxy/gateway/internal/anthropic"
+	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/control"
 )
 
@@ -102,6 +103,10 @@ func (h *Handler) forward(
 	defer resp.Body.Close()
 
 	rlHeaders := extractRateLimitHeaders(resp.Header)
+	if resp.StatusCode/100 == 2 {
+		// A Claude Code version Anthropic accepts right now — routing presents it too.
+		ccident.ObserveUserAgent(r.Header.Get("User-Agent"))
+	}
 	report := control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: resp.StatusCode, RatelimitHeaders: rlHeaders}
 
 	// Retryable status on a non-last attempt: drain and let the caller try the next account.

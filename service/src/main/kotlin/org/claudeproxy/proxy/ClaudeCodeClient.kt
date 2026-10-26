@@ -17,7 +17,7 @@ import java.util.UUID
  * [RequestRewriter] only swaps the identity values.
  */
 object ClaudeCodeClient {
-    val userAgent: String get() = envOrProp("CLAUDE_CODE_USER_AGENT") ?: "claude-cli/2.1.259 (external, cli)"
+    val userAgent: String get() = envOrProp("CLAUDE_CODE_USER_AGENT") ?: "claude-cli/2.1.292 (external, cli)"
 
     /**
      * A CLI session lives for hours, not one request: one id per (purpose, owner, account) per

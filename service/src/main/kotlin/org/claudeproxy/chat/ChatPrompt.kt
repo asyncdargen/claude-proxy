@@ -189,6 +189,19 @@ use the gaps between them when they matter ("yesterday", "a moment ago", a stale
     private const val MAX_TOKENS_THINKING = 32_000
 
     /**
+     * Whether [model] takes `thinking: {type: "adaptive"}`. From Opus 4.7 and the whole 5 generation
+     * on, a fixed `budget_tokens` is a 400 (Opus 5.5 rejected every chat turn with thinking on);
+     * 4.6 still accepts it but adaptive is its native mode. Haiku 4.5 and older only know budgets.
+     */
+    internal fun adaptiveThinking(model: String): Boolean {
+        val m = Regex("""^claude-([a-z]+)-(\d{1,2})(?:-(\d{1,2}))?(?:-|$)""").find(model.lowercase()) ?: return false
+        val family = m.groupValues[1]
+        val major = m.groupValues[2].toInt()
+        val minor = m.groupValues[3].toIntOrNull() ?: 0
+        return major >= 5 || (major == 4 && minor >= 6 && family != "haiku")
+    }
+
+    /**
      * The full Messages request body. [webSearch] adds Anthropic's server-side search tool (billed
      * per invocation and priced by `web_search_price`); [thinking] turns on extended thinking,
      * whose deltas the UI shows in a collapsed block.
@@ -210,8 +223,14 @@ use the gaps between them when they matter ("yesterday", "a moment ago", a stale
         put("system", system)
         putJsonArray("messages") { turns.forEachIndexed { i, t -> add(messageObject(t, i in marks, zone)) } }
         if (thinking) putJsonObject("thinking") {
-            put("type", "enabled")
-            put("budget_tokens", THINKING_BUDGET)
+            if (adaptiveThinking(model)) {
+                put("type", "adaptive")
+                // These models omit the reasoning text by default; the UI shows it, so ask for it.
+                put("display", "summarized")
+            } else {
+                put("type", "enabled")
+                put("budget_tokens", THINKING_BUDGET)
+            }
         }
         if (webSearch) putJsonArray("tools") {
             addJsonObject {

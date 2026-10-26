@@ -31,7 +31,8 @@ type Config struct {
 	// with a 524, which is what a slow upstream (or a couple of retried candidates) reached.
 	EarlyHeadTimeout time.Duration
 	// ClaudeCodeUserAgent is the user agent the routing gateways present upstream
-	// (env CLAUDE_CODE_USER_AGENT). The proxy datapath forwards the real client's own.
+	// (env CLAUDE_CODE_USER_AGENT). The proxy datapath forwards the real client's own, and a newer
+	// one seen succeeding there replaces this at runtime (ccident.UserAgent).
 	ClaudeCodeUserAgent string
 }
 
@@ -45,7 +46,7 @@ func Load() *Config {
 		UpstreamBaseURL:      envOr("UPSTREAM_BASE_URL", "https://api.anthropic.com"),
 		UpstreamStallTimeout: secondsOr("UPSTREAM_STALL_SECONDS", 120*time.Second),
 		EarlyHeadTimeout:     secondsOr("EARLY_HEAD_SECONDS", 45*time.Second),
-		ClaudeCodeUserAgent:  envOr("CLAUDE_CODE_USER_AGENT", "claude-cli/2.1.259 (external, cli)"),
+		ClaudeCodeUserAgent:  envOr("CLAUDE_CODE_USER_AGENT", "claude-cli/2.1.292 (external, cli)"),
 	}
 }
 
