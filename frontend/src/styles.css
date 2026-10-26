@@ -218,6 +218,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .bar { height: 7px; background: var(--panel-3); border-radius: 999px; overflow: hidden; min-width: 76px; flex: 1; }
 .bar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--ok), var(--warn) 70%, var(--bad)); }
 .win { display: flex; flex-direction: column; gap: 3px; min-width: 130px; }
+/* In a column flex `flex: 1` makes the basis (0%) the bar's height; recent WebKit honours it
+   literally and the bar collapses to nothing, Chrome falls back to `height`. Pin it. */
+.win > .bar { flex: none; }
 .win .win-top { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
 .win .win-top b { color: var(--text); }
 
