@@ -3,7 +3,11 @@ package org.claudeproxy.repo
 import org.claudeproxy.Config
 import org.claudeproxy.db.Crypto
 import org.claudeproxy.db.Db
+import org.claudeproxy.db.ModelPriceBase
 import org.claudeproxy.db.ModelPrices
+import org.claudeproxy.db.Settings
+import org.jetbrains.exposed.sql.deleteWhere
+import org.jetbrains.exposed.sql.insert
 import org.claudeproxy.accounts.Secrets
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.selectAll
@@ -111,11 +115,12 @@ class ModelPricingTest {
      */
     @Test
     fun `seeding backfills a missing 1h cache-write price`() {
+        ModelPriceRepo.set("test-model", 5.0, 25.0, 0.5, 6.25, cacheWrite1h = 7.0, fastMultiplier = 2.0, webSearchPrice = 0.01)
         transaction {
-            ModelPrices.update({ ModelPrices.pattern eq "claude-opus-5" }) { it[cacheWrite1hPrice] = 0.0 }
+            ModelPrices.update({ ModelPrices.pattern eq "test-model" }) { it[cacheWrite1hPrice] = 0.0 }
         }
         ModelPriceRepo.seedDefaults()
-        val row = transaction { ModelPrices.selectAll().first { it[ModelPrices.pattern] == "claude-opus-5" } }
+        val row = transaction { ModelPrices.selectAll().first { it[ModelPrices.pattern] == "test-model" } }
         assertEquals(10.0, row[ModelPrices.cacheWrite1hPrice], "2× the \$5 input price")
     }
 
@@ -156,5 +161,64 @@ class ModelPricingTest {
         assertMoney(0.25, ModelPriceRepo.costOf("claude-fable-5-1", BilledUsage(cacheRead = 1_000_000)))
         assertMoney(0.25, ModelPriceRepo.costOf("claude-mythos-5-1", BilledUsage(cacheRead = 1_000_000)))
         assertMoney(1.0, ModelPriceRepo.costOf("claude-fable-5", BilledUsage(cacheRead = 1_000_000)))
+    }
+
+    private fun price(pattern: String) = ModelPriceRepo.list().first { it.pattern == pattern }
+
+    /** A synced row replaces the builtin one, but never an operator override. */
+    @Test
+    fun `sync updates the base layer and leaves overrides alone`() {
+        ModelPriceRepo.set("claude-opus-5", 9.0, 45.0, 0.9, 11.25, 18.0, 2.0, 0.01)
+        val changed = ModelPriceRepo.applySynced(
+            listOf(
+                ModelPriceDto("claude-opus-5", 6.0, 30.0, 0.6, 7.5, 12.0),
+                ModelPriceDto("claude-sonnet-5", 1.0, 5.0, 0.1, 1.25, 2.0),
+                ModelPriceDto("claude-new-7", 3.0, 15.0, 0.3, 3.75, 6.0),
+            ),
+        )
+        assertEquals(3, changed)
+        assertEquals("override", price("claude-opus-5").origin)
+        assertEquals(9.0, price("claude-opus-5").inputPrice, "the override still wins")
+        assertTrue(price("claude-opus-5").hasBase)
+        assertEquals("synced", price("claude-sonnet-5").origin)
+        assertEquals(1.0, price("claude-sonnet-5").inputPrice)
+        assertMoney(3.0, ModelPriceRepo.costOf("claude-new-7-20270101", BilledUsage(input = 1_000_000)))
+        // Re-applying identical rows is a no-op.
+        assertEquals(0, ModelPriceRepo.applySynced(listOf(ModelPriceDto("claude-sonnet-5", 1.0, 5.0, 0.1, 1.25, 2.0))))
+    }
+
+    /** Deleting an override falls back to the base row; a restart's re-seed keeps the synced one. */
+    @Test
+    fun `resetting an override returns to the base price`() {
+        ModelPriceRepo.applySynced(listOf(ModelPriceDto("claude-opus-5", 6.0, 30.0, 0.6, 7.5, 12.0)))
+        ModelPriceRepo.set("claude-opus-5", 9.0, 45.0, 0.9, 11.25, 18.0, 2.0, 0.01)
+        ModelPriceRepo.delete("claude-opus-5")
+        ModelPriceRepo.seedDefaults()
+        assertEquals("synced", price("claude-opus-5").origin)
+        assertEquals(6.0, price("claude-opus-5").inputPrice, "the seed must not clobber a fresher sync")
+    }
+
+    /**
+     * Upgrading from the single-table layout: rows equal to the seed are the seed and move out of
+     * the way, an edited row stays an override — no pattern's effective price changes.
+     */
+    @Test
+    fun `the layer migration keeps edits and releases seed rows`() {
+        transaction {
+            Settings.deleteWhere { key eq "migrated:price_layers" }
+            ModelPrices.insert {
+                it[pattern] = "claude-opus-5"; it[inputPrice] = 5.0; it[outputPrice] = 25.0; it[cacheReadPrice] = 0.5
+                it[cacheWritePrice] = 6.25; it[cacheWrite1hPrice] = 10.0
+            }
+            ModelPrices.insert {
+                it[pattern] = "claude-sonnet-5"; it[inputPrice] = 3.0; it[outputPrice] = 15.0; it[cacheReadPrice] = 0.3
+                it[cacheWritePrice] = 3.75; it[cacheWrite1hPrice] = 6.0
+            }
+        }
+        ModelPriceRepo.seedDefaults()
+        assertEquals("builtin", price("claude-opus-5").origin)
+        assertEquals("override", price("claude-sonnet-5").origin)
+        assertEquals(3.0, price("claude-sonnet-5").inputPrice)
+        assertTrue(transaction { ModelPriceBase.selectAll().any { it[ModelPriceBase.pattern] == "claude-sonnet-5" } })
     }
 }

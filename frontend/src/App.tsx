@@ -31,7 +31,7 @@ const NAV: NavDef[] = [
   { path: '/stats', label: 'Statistics', icon: 'stats', anyPerm: ['STATS_VIEW', 'STATS_VIEW_RECENT', 'STATS_VIEW_ACCOUNTS'] },
   { path: '/tokens', label: 'Proxy Tokens', icon: 'tokens', perm: 'PROXY_USE' },
   { path: '/routing', label: 'API Routing', icon: 'routing', perm: 'ROUTING_USE' },
-  { path: '/pricing', label: 'Model Pricing', icon: 'pricing', perm: 'ADMIN' },
+  { path: '/pricing', label: 'Models & Pricing', icon: 'pricing', perm: 'ADMIN' },
   { path: '/users', label: 'Users & Roles', icon: 'users', perm: 'USERS_MANAGE' },
 ];
 

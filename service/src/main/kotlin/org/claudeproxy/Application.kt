@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("Application")
 
+@OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
 fun main() {
     val config = Config.load()
     org.claudeproxy.proxy.Http.configure(config.anthropicProxy)
@@ -54,6 +55,10 @@ fun main() {
     val refresher = TokenRefresher(pool)
     val probe = LimitProbe(pool, config.upstreamBaseUrl)
     val scheduler = LimitScheduler(pool, probe)
+
+    // Started here rather than in module(): both reach the network, which tests of module() must not.
+    org.claudeproxy.catalog.ModelCatalog.start(GlobalScope, pool, config.upstreamBaseUrl)
+    org.claudeproxy.catalog.PriceSync.start(GlobalScope)
 
     log.info("Starting claude-proxy on {}:{} (upstream {})", config.bindHost, config.port, config.upstreamBaseUrl)
     if (!config.blockPasswordForLinked) log.warn("OIDC_BLOCK_PASSWORD_FOR_LINKED=false: SSO-linked users may also sign in with a password")

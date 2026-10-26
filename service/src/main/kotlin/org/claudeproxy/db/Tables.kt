@@ -74,6 +74,51 @@ object ModelPrices : Table("model_prices") {
     override val primaryKey = PrimaryKey(pattern)
 }
 
+/**
+ * The *base* price layer, under [ModelPrices]: what a pattern costs unless an operator overrides
+ * it. `origin` is `builtin` (the curated seed in ModelPriceRepo, rewritten on every start) or
+ * `synced` (pulled from the public price list by PriceSync). [ModelPrices] holds only operator
+ * overrides, which win per pattern and are never touched by a sync — so an edit made in the UI
+ * survives every price update, and deleting it falls back to the base row instead of to $0.
+ */
+object ModelPriceBase : Table("model_price_base") {
+    val pattern = varchar("pattern", 64)
+    val inputPrice = double("input_price").default(0.0)
+    val outputPrice = double("output_price").default(0.0)
+    val cacheReadPrice = double("cache_read_price").default(0.0)
+    val cacheWritePrice = double("cache_write_price").default(0.0)
+    val cacheWrite1hPrice = double("cache_write_1h_price").default(0.0)
+    val fastMultiplier = double("fast_multiplier").default(2.0)
+    val webSearchPrice = double("web_search_price").default(0.01)
+    val origin = varchar("origin", 16).default("builtin")
+    val updatedAt = long("updated_at").default(0)
+    override val primaryKey = PrimaryKey(pattern)
+}
+
+/**
+ * Last model listing Anthropic returned (`/v1/models`), persisted so a restart with no healthy
+ * account still advertises the models seen before it. Replaced wholesale on every refresh.
+ */
+object ModelsLive : Table("models_live") {
+    val id = varchar("id", 128)
+    val displayName = varchar("display_name", 128).nullable()
+    val createdAt = varchar("created_at", 40).nullable()
+    val position = integer("position").default(0)
+    override val primaryKey = PrimaryKey(id)
+}
+
+/**
+ * Operator edits to the model catalogue: rename, hide, or add an id upstream does not list (a
+ * row whose id is absent from [ModelsLive] *is* a hand-added model).
+ */
+object ModelOverrides : Table("model_overrides") {
+    val id = varchar("id", 128)
+    val displayName = varchar("display_name", 128).nullable()
+    val description = varchar("description", 256).nullable()
+    val hidden = bool("hidden").default(false)
+    override val primaryKey = PrimaryKey(id)
+}
+
 object Roles : Table("roles") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 64).uniqueIndex()
@@ -391,7 +436,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 }
 
 val ALL_TABLES = arrayOf(
-    Users, UserIdentities, Settings, ModelPrices, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
+    Users, UserIdentities, Settings, ModelPrices, ModelPriceBase, ModelsLive, ModelOverrides, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
     AccountGroups, UserGroupAccess,
     Accounts, AccountSecrets, AccountLimits, UsageEvents, McpToolCalls, WindowSnapshots,
     OAuthAddSessions, SessionOwners, SessionMap,

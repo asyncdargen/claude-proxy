@@ -43,7 +43,32 @@ export interface ModelPrice {
   fastMultiplier: number;
   // USD per server-side web search (billed per invocation, not per token)
   webSearchPrice: number;
+  // "builtin" (curated seed) | "synced" (public price list) | "override" (an admin edit)
+  origin?: 'builtin' | 'synced' | 'override';
+  // an override that shadows a base row: deleting it resets to that row
+  hasBase?: boolean;
 }
+
+export interface PriceSyncStatus { enabled: boolean; url: string | null; at: string | null; result: string | null; }
+
+export interface CatalogModel {
+  id: string;
+  displayName: string;
+  description: string | null;
+  // "live" (Anthropic lists it) | "builtin" (no listing yet) | "manual" (admin-added)
+  origin: 'live' | 'builtin' | 'manual';
+  hidden: boolean;
+  overridden: boolean;
+  createdAt: string | null;
+  // the pricing pattern that bills this id; null = it costs $0
+  pricePattern: string | null;
+  priceOrigin: string | null;
+  // the override's own fields; null = inherited from the listing
+  customName: string | null;
+  customDescription: string | null;
+}
+
+export interface CatalogStatus { models: CatalogModel[]; refreshedAt: string | null; refreshResult: string | null; }
 
 /** Fractions of ONE account quota, not shares of the spent portion. */
 export interface AttributionContributor {
@@ -421,6 +446,13 @@ export const api = {
   modelPrices: () => req<ModelPrice[]>('GET', '/api/model-prices'),
   setModelPrice: (b: ModelPrice) => req<ModelPrice[]>('POST', '/api/model-prices', b),
   deleteModelPrice: (pattern: string) => req<ModelPrice[]>('DELETE', `/api/model-prices/${encodeURIComponent(pattern)}`),
+  priceSyncStatus: () => req<PriceSyncStatus>('GET', '/api/model-prices/sync'),
+  syncPrices: () => req<PriceSyncStatus>('POST', '/api/model-prices/sync'),
+  modelCatalog: () => req<CatalogStatus>('GET', '/api/models'),
+  refreshModels: () => req<CatalogStatus>('POST', '/api/models/refresh'),
+  setModelOverride: (b: { id: string; displayName?: string | null; description?: string | null; hidden: boolean }) =>
+    req<CatalogStatus>('POST', '/api/models/overrides', b),
+  deleteModelOverride: (id: string) => req<CatalogStatus>('DELETE', `/api/models/overrides/${encodeURIComponent(id)}`),
 
   login: (username: string, password: string) =>
     req<UserDto>('POST', '/api/auth/login', { username, password }),

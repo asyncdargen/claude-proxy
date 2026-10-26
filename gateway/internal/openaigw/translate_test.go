@@ -264,7 +264,7 @@ func TestModelMapping(t *testing.T) {
 	cases := map[string]string{
 		"gpt-4o":                    "claude-sonnet-5",
 		"gpt-4o-mini":               "claude-haiku-4-5-20251001",
-		"o1-opus-ish-opus":          "claude-opus-4-8",
+		"o1-opus-ish-opus":          "claude-opus-5-5",           // newest opus in the catalogue
 		"claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001", // claude-* passthrough
 		"my-alias":                  "claude-opus-4-8",
 		"":                          "claude-sonnet-5",

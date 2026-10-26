@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
 	"claudeproxy/gateway/internal/egress"
+	"claudeproxy/gateway/internal/models"
 	"claudeproxy/gateway/internal/openaigw"
 	"claudeproxy/gateway/internal/proxy"
 	"claudeproxy/gateway/internal/routing"
@@ -61,6 +63,20 @@ func main() {
 	if _, err := egress.ParseProxy(cfg.AnthropicProxyURL); err != nil {
 		log.Fatal(err)
 	}
+	// The routing gateways' /v1/models follows the service's catalogue (Anthropic's listing plus
+	// the operator's overrides) instead of a list compiled into this binary.
+	modelsCtrl := control.New(cfg.ServiceURL, cfg.InternalToken)
+	go models.Keep(context.Background(), func(ctx context.Context) ([]models.Model, error) {
+		infos, err := modelsCtrl.Models(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]models.Model, 0, len(infos))
+		for _, m := range infos {
+			out = append(out, models.Model{ID: m.ID, DisplayName: m.DisplayName, CreatedAt: m.CreatedAt})
+		}
+		return out, nil
+	}, 5*time.Minute)
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           newMux(cfg),

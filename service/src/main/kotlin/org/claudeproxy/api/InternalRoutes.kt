@@ -4,6 +4,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import org.claudeproxy.datapath.DatapathService
@@ -45,6 +46,14 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
                 )
             }
         }
+        // The model list the routing gateways advertise on their /v1/models (hidden ones excluded).
+        get("/models") {
+            if (!call.authorized()) return@get call.respond(HttpStatusCode.Unauthorized)
+            call.respond(
+                org.claudeproxy.catalog.ModelCatalog.visible()
+                    .map { InternalModel(it.id, it.displayName, it.createdAt) },
+            )
+        }
         post("/usage") {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val report = call.receive<UsageReport>()
@@ -61,3 +70,5 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
     }
 }
 
+@kotlinx.serialization.Serializable
+data class InternalModel(val id: String, val displayName: String, val createdAt: String? = null)

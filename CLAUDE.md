@@ -186,6 +186,20 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   `UsageRepo.record` stores what it returns and hands the same number to the daily-limit counter,
   so stats and limits cannot drift. `usage_events` keeps the 1h slice, web search/fetch counts and
   the fast flag alongside the totals so a stored cost stays auditable.
+- **Price layers + auto-sync** (`catalog/PriceSync`, `model_price_base` under `model_prices`):
+  the *base* layer is the curated seed (`origin=builtin`, rewritten on every start) plus rows
+  pulled daily from LiteLLM's public price file (`origin=synced`, replaces builtin per pattern;
+  `PRICING_SYNC_URL=off` disables). `model_prices` now holds **only admin overrides**, which win
+  per pattern and are never written by a sync; deleting one resets to the base row. A one-time
+  migration (`migrated:price_layers`) moved rows equal to the seed out of `model_prices` and kept
+  every differing row as an override, so no effective price changed on upgrade.
+- **Model catalogue** (`catalog/ModelCatalog`, `models_live` + `model_overrides`): Anthropic's
+  `/v1/models` read through the pool every `MODELS_REFRESH_HOURS` (6), persisted, under admin
+  overrides (rename / hide / add an unlisted id); curated builtin list until the first listing.
+  It feeds the routing gateways' `/v1/models` (Go polls `GET /internal/models` every 5 min,
+  `internal/models.Fallback` until then; OpenAI "opus"/"haiku" aliases map to the newest listed
+  one) and the chat picker. Admin UI: "Models & Pricing" (`/pricing`). Both background jobs start
+  in `main()`, not `module()`, so tests of `module()` never reach the network.
 - **Response-side model attribution:** the gateway prices what the *response* says answered
   (`message_start.message.model`), falling back to the request's model. Server-side refusal
   fallback can hand the turn to a different model mid-call, and paying the requested model's rate

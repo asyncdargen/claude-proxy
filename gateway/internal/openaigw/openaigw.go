@@ -64,11 +64,11 @@ func (t *Translator) mapModel(requested string) string {
 	lower := strings.ToLower(requested)
 	switch {
 	case strings.Contains(lower, "opus"):
-		return "claude-opus-4-8"
+		return models.Newest("opus", "claude-opus-5-5")
 	case strings.Contains(lower, "haiku"), strings.Contains(lower, "mini"),
 		strings.Contains(lower, "small"), strings.Contains(lower, "nano"),
 		strings.Contains(lower, "gpt-3.5"):
-		return "claude-haiku-4-5-20251001"
+		return models.Newest("haiku", "claude-haiku-4-5-20251001")
 	default:
 		return t.defaultModel
 	}
@@ -77,9 +77,10 @@ func (t *Translator) mapModel(requested string) string {
 // HandleLocal serves GET /v1/models with an OpenAI-shaped model list (no upstream call).
 func (t *Translator) HandleLocal(w http.ResponseWriter, method, path string) bool {
 	if method == http.MethodGet && path == "/v1/models" {
-		data := make([]map[string]any, 0, len(models.Claude))
-		for _, m := range models.Claude {
-			data = append(data, openaiModel(m.ID))
+		list := models.List()
+		data := make([]map[string]any, 0, len(list))
+		for _, m := range list {
+			data = append(data, openaiModel(m))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -87,12 +88,10 @@ func (t *Translator) HandleLocal(w http.ResponseWriter, method, path string) boo
 	}
 	if method == http.MethodGet && strings.HasPrefix(path, "/v1/models/") {
 		id := strings.TrimPrefix(path, "/v1/models/")
-		for _, m := range models.Claude {
-			if m.ID == id {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(openaiModel(id))
-				return true
-			}
+		if m, ok := models.Find(id); ok {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(openaiModel(m))
+			return true
 		}
 		t.WriteError(w, http.StatusNotFound, "invalid_request_error", "model '"+id+"' not found")
 		return true
@@ -275,11 +274,11 @@ func openaiErrorFromAnthropic(upstream []byte) []byte {
 	return out
 }
 
-func openaiModel(id string) map[string]any {
+func openaiModel(m models.Model) map[string]any {
 	return map[string]any{
-		"id":       id,
+		"id":       m.ID,
 		"object":   "model",
-		"created":  models.Created,
+		"created":  m.CreatedUnix(),
 		"owned_by": "anthropic",
 	}
 }

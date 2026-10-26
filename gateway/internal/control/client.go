@@ -159,6 +159,36 @@ func (c *Client) Resolve(ctx context.Context, token, method, path string) (*Reso
 	return &out, resp.StatusCode, nil
 }
 
+// ModelInfo is one entry of /internal/models.
+type ModelInfo struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	CreatedAt   string `json:"createdAt,omitempty"`
+}
+
+// Models fetches the model catalogue the routing gateways advertise.
+func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.serviceURL+"/internal/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", c.internalToken)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("models: HTTP %d", resp.StatusCode)
+	}
+	var out []ModelInfo
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	return out, nil
+}
+
 // EndSession tells the service this request is done, closing the "active now" entry the resolve
 // opened. Fire-and-forget and single-shot: a lost close only leaves an entry to age out server
 // side, which is not worth retrying (or ever blocking the response path) for.

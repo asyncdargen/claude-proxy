@@ -188,7 +188,7 @@ fun Route.chatRoutes(pool: AccountPool, engine: ChatEngine, datapath: DatapathSe
 
         get("/models") {
             call.requirePermission(Permission.CHAT_USE)
-            call.respond(ChatModels.list(pool, upstreamBaseUrl))
+            call.respond(ChatModels.list())
         }
 
         // ---- attachments ----

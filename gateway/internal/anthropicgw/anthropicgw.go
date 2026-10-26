@@ -122,27 +122,26 @@ func (s *passthrough) Usage() routing.Usage {
 func writeModels(w http.ResponseWriter, path string) {
 	// /v1/models/{id} → single model; /v1/models → list.
 	if id := strings.TrimPrefix(path, "/v1/models/"); id != path && id != "" {
-		for _, m := range models.Claude {
-			if m.ID == id {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(anthModel(m))
-				return
-			}
+		if m, ok := models.Find(id); ok {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(anthModel(m))
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{"type": "not_found_error", "message": "model not found"}})
 		return
 	}
-	data := make([]map[string]any, 0, len(models.Claude))
-	for _, m := range models.Claude {
+	list := models.List()
+	data := make([]map[string]any, 0, len(list))
+	for _, m := range list {
 		data = append(data, anthModel(m))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]any{"data": data, "has_more": false}
-	if len(models.Claude) > 0 {
-		resp["first_id"] = models.Claude[0].ID
-		resp["last_id"] = models.Claude[len(models.Claude)-1].ID
+	if len(list) > 0 {
+		resp["first_id"] = list[0].ID
+		resp["last_id"] = list[len(list)-1].ID
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -152,6 +151,6 @@ func anthModel(m models.Model) map[string]any {
 		"type":         "model",
 		"id":           m.ID,
 		"display_name": m.DisplayName,
-		"created_at":   models.CreatedAt,
+		"created_at":   m.CreatedAtOrDefault(),
 	}
 }

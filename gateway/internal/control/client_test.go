@@ -107,3 +107,21 @@ func TestReportUsagePosts(t *testing.T) {
 		t.Errorf("got = %+v", got)
 	}
 }
+
+func TestModelsFetchesCatalogue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/models" || r.Header.Get("X-Internal-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`[{"id":"claude-opus-5-5","displayName":"Claude Opus 5.5","createdAt":"2026-09-01T00:00:00Z"}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "secret").Models(context.Background())
+	if err != nil || len(got) != 1 || got[0].ID != "claude-opus-5-5" || got[0].DisplayName != "Claude Opus 5.5" {
+		t.Fatalf("Models() = %v, %v", got, err)
+	}
+	if _, err := New(srv.URL, "wrong").Models(context.Background()); err == nil {
+		t.Fatalf("a 401 must surface as an error, not an empty list")
+	}
+}

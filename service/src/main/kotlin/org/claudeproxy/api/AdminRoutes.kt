@@ -75,6 +75,7 @@ fun Route.adminRoutes(
             ModelPriceRepo.delete(p)
             call.respond(ModelPriceRepo.list())
         }
+        modelRoutes(pool, upstreamBaseUrl)
         installRoutes(publicBaseUrl)
         authRoutes(passwordLogin = oidc?.disablePasswordLogin != true, blockLinked = blockPasswordForLinked)
         oidcRoutes(oidc)
