@@ -24,6 +24,13 @@ variable "REVISION" {
   default = ""
 }
 
+# Repository the packages belong to. GitHub links a container package to its repo from
+# org.opencontainers.image.source — and for a multi-arch image it reads that from the *index*
+# manifest's annotations, not from the per-platform image labels (which the Dockerfiles set too).
+variable "SOURCE" {
+  default = "https://github.com/asyncdargen/claude-proxy"
+}
+
 variable "PLATFORMS" {
   default = "linux/amd64,linux/arm64"
 }
@@ -35,6 +42,15 @@ function "tags" {
     notequal(VERSION, "") ? "${REGISTRY}/${name}:${VERSION}" : "",
     notequal(REVISION, "") ? "${REGISTRY}/${name}:sha-${substr(REVISION, 0, 7)}" : "",
   ])
+}
+
+function "annotations" {
+  params = [description]
+  result = [
+    "index,manifest:org.opencontainers.image.source=${SOURCE}",
+    "index,manifest:org.opencontainers.image.description=${description}",
+    "index,manifest:org.opencontainers.image.licenses=MIT",
+  ]
 }
 
 group "default" {
@@ -54,22 +70,26 @@ target "service" {
   inherits   = ["_common"]
   dockerfile = "deploy/Dockerfile.service"
   tags       = tags("claude-proxy-service")
+  annotations = annotations("claude-proxy Kotlin service: management API, control API, Kotlin datapath")
 }
 
 target "gateway" {
   inherits   = ["_common"]
   dockerfile = "deploy/Dockerfile.gateway"
   tags       = tags("claude-proxy-gateway")
+  annotations = annotations("claude-proxy Go data plane: Claude Code datapath + OpenAI/Anthropic routing gateways")
 }
 
 target "web" {
   inherits   = ["_common"]
   dockerfile = "deploy/Dockerfile.web"
   tags       = tags("claude-proxy-web")
+  annotations = annotations("claude-proxy admin/chat UI and edge router (nginx)")
 }
 
 target "allinone" {
   inherits   = ["_common"]
   dockerfile = "deploy/Dockerfile.allinone"
   tags       = tags("claude-proxy")
+  annotations = annotations("claude-proxy all-in-one: service + gateway + web UI in one container")
 }
