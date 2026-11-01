@@ -20,6 +20,7 @@ import org.claudeproxy.auth.requirePermission
 import org.claudeproxy.auth.requireUser
 import org.claudeproxy.auth.setUserSession
 import org.claudeproxy.model.AccountType
+import org.claudeproxy.model.AccountKind
 import org.claudeproxy.model.Permission
 import org.claudeproxy.model.PoolStatsDto
 import org.claudeproxy.model.UserDto
@@ -146,22 +147,24 @@ private fun assembleStats(
     val accounts = runtimes.map { rt ->
         rt.toDto(createdAt[rt.id]?.toString() ?: Instant.now().toString(), perAcc[rt.id] ?: Totals())
     }
-    // Weekly headroom mirrors the 5-hour `effectiveRemaining` logic: coefficient-weighted
-    // remaining over the accounts that actually report a weekly reading (API keys count as
-    // full capacity, since they have no subscription window). Accounts with no weekly reading
-    // are excluded from both sums so the resulting % stays meaningful.
-    val weeklyContribs = runtimes.mapNotNull { rt ->
-        val wu = rt.limit.window(WindowKind.WEEKLY)?.usageFraction()
-        val rem = wu?.let { rt.coefficient * (1.0 - it) }
-            ?: if (rt.type == org.claudeproxy.model.AccountType.API_KEY) rt.coefficient else null
-        rem?.let { it to rt.coefficient }
+    // Headroom is counted in Pro-sized windows, weighted by each account's plan (see
+    // AccountKind). API keys have no subscription window and stay out of both sums; so do
+    // accounts with no weekly reading yet, so the resulting % stays meaningful.
+    val subscriptions = runtimes.filter { !it.isApiKey }
+    val weeklyContribs = subscriptions.mapNotNull { rt ->
+        rt.limit.window(WindowKind.WEEKLY)?.usageFraction()?.let { wu ->
+            rt.kind.weeklyWeight * (1.0 - wu) to rt.kind.weeklyWeight
+        }
     }
     return PoolStatsDto(
         totalAccounts = runtimes.size,
         healthyAccounts = runtimes.count { it.enabled && it.health == org.claudeproxy.model.AccountHealth.OK },
         activeAccountId = activeAccountId,
         totalEffectiveRemaining = accounts.sumOf { it.effectiveRemaining ?: 0.0 },
-        totalEffectiveCapacity = runtimes.sumOf { it.coefficient },
+        // only accounts with a reading count toward capacity, as for the weekly figure — an
+        // account nobody has measured yet would otherwise read as a fully spent one
+        totalEffectiveCapacity = runtimes.zip(accounts).filter { (rt, dto) -> !rt.isApiKey && dto.effectiveRemaining != null }
+            .sumOf { (rt, _) -> rt.kind.fiveHourWeight },
         totalWeeklyRemaining = weeklyContribs.sumOf { it.first },
         totalWeeklyCapacity = weeklyContribs.sumOf { it.second },
         totalRequests = poolWide.requests,
@@ -252,19 +255,14 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
     post("/accounts") {
         val user = call.requirePermission(Permission.ACCOUNTS_MANAGE)
         val req = call.receive<CreateAccountRequest>()
-        val type = AccountType.fromString(req.type)
-            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown type ${req.type}"))
-        val secret = when (type) {
-            AccountType.API_KEY -> {
-                val key = req.apiKey ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
-                AccountSecret(apiKey = key)
-            }
-            AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
-                val access = req.accessToken ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
-                AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
-            }
+        val v = try { req.validated(personal = false) } catch (e: InputError) {
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
         }
-        val id = AccountRepo.create(req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id)
+        val id = AccountRepo.create(
+            req.name, v.type, req.groupId, req.priority, req.threshold, v.kind, v.secret, user.id,
+            apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle,
+        )
+        applyProxy(id, req.proxy)
         pool.reload()
         runCatching { probe.probe(id) } // scrape limits on add (best effort)
         call.respond(buildPoolStats(pool))
@@ -275,8 +273,13 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
         val id = call.parameters["id"]?.toIntOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         val req = call.receive<UpdateAccountRequest>()
+        val v = try { req.validated(personal = false) } catch (e: InputError) {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
+        }
         if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
-        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, req.clearGroup, req.overThreshold, accountUuid = req.accountUuid)
+        AccountRepo.updateConfig(id, req.name, req.groupId, req.priority, req.threshold, v.kind, req.enabled, req.deviceId, req.clearGroup, req.overThreshold,
+            accountUuid = req.accountUuid, apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle)
+        applyProxy(id, req.proxy)
         pool.reload()
         call.respond(buildPoolStats(pool))
     }
@@ -322,7 +325,8 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid or expired state"))
         val (code, stateFromCode) = ClaudeOAuth.splitCode(req.code)
         try {
-            val result = ClaudeOAuth.exchangeCode(Http.client, code, verifier, stateFromCode ?: req.state)
+            val kind = AccountKind.fromString(req.kind) ?: AccountKind.NONE
+            val result = ClaudeOAuth.exchangeCode(Http.clientFor(proxyFromInput(req.proxy, personal = false)), code, verifier, stateFromCode ?: req.state)
             val secret = AccountSecret(
                 accessToken = result.accessToken,
                 refreshToken = result.refreshToken,
@@ -330,9 +334,10 @@ private fun Route.accountRoutes(pool: AccountPool, probe: LimitProbe) {
             )
             val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
             val id = AccountRepo.create(
-                req.name, type, req.groupId, req.priority, req.threshold, req.coefficient, secret, user.id,
-                accountUuid = accountUuidAtLogin(result),
+                req.name, type, req.groupId, req.priority, req.threshold, kind, secret, user.id,
+                accountUuid = accountUuidAtLogin(result, proxyFromInput(req.proxy, personal = false)),
             )
+            applyProxy(id, req.proxy)
             pool.reload()
             runCatching { probe.probe(id) }
             call.respond(buildPoolStats(pool))
@@ -358,19 +363,14 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
     post("/my/accounts") {
         val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
         val req = call.receive<CreateAccountRequest>()
-        val type = AccountType.fromString(req.type)
-            ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Unknown type ${req.type}"))
-        val secret = when (type) {
-            AccountType.API_KEY -> {
-                val key = req.apiKey ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("apiKey required"))
-                AccountSecret(apiKey = key)
-            }
-            AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
-                val access = req.accessToken ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("accessToken required"))
-                AccountSecret(accessToken = access, refreshToken = req.refreshToken, expiresAt = req.expiresAt)
-            }
+        val v = try { req.validated(personal = true) } catch (e: InputError) {
+            return@post call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
         }
-        val id = AccountRepo.create(req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id)
+        val id = AccountRepo.create(
+            req.name, v.type, null, req.priority, req.threshold, v.kind, v.secret, createdBy = user.id, ownerId = user.id,
+            apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle,
+        )
+        applyProxy(id, req.proxy)
         pool.reload()
         runCatching { probe.probe(id) }
         call.respond(buildOwnedStats(pool, user.id))
@@ -381,9 +381,14 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
             ?: return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         if (!AccountRepo.isOwnedBy(id, user.id)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
+        val v = try { req.validated(personal = true) } catch (e: InputError) {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
+        }
         // personal accounts are never grouped
         if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
-        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
+        AccountRepo.updateConfig(id, req.name, null, req.priority, req.threshold, v.kind, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold,
+            accountUuid = req.accountUuid, apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle)
+        applyProxy(id, req.proxy)
         pool.reload()
         call.respond(buildOwnedStats(pool, user.id))
     }
@@ -423,13 +428,15 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
             ?: return@post call.respond(HttpStatusCode.BadRequest, MessageResponse("Invalid or expired state"))
         val (code, stateFromCode) = ClaudeOAuth.splitCode(req.code)
         try {
-            val result = ClaudeOAuth.exchangeCode(Http.client, code, verifier, stateFromCode ?: req.state)
+            val kind = AccountKind.fromString(req.kind) ?: AccountKind.NONE
+            val result = ClaudeOAuth.exchangeCode(Http.clientFor(proxyFromInput(req.proxy, personal = true)), code, verifier, stateFromCode ?: req.state)
             val secret = AccountSecret(accessToken = result.accessToken, refreshToken = result.refreshToken, expiresAt = result.expiresAtMillis)
             val type = if (result.refreshToken != null) AccountType.OAUTH else AccountType.OAUTH_STATIC
             val id = AccountRepo.create(
-                req.name, type, null, req.priority, req.threshold, req.coefficient, secret, createdBy = user.id, ownerId = user.id,
-                accountUuid = accountUuidAtLogin(result),
+                req.name, type, null, req.priority, req.threshold, kind, secret, createdBy = user.id, ownerId = user.id,
+                accountUuid = accountUuidAtLogin(result, proxyFromInput(req.proxy, personal = true)),
             )
+            applyProxy(id, req.proxy)
             pool.reload()
             runCatching { probe.probe(id) }
             call.respond(buildOwnedStats(pool, user.id))
@@ -462,8 +469,13 @@ private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         if (uid == null || aid == null) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
         if (!AccountRepo.isOwnedBy(aid, uid)) return@patch call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
         val req = call.receive<UpdateAccountRequest>()
+        val v = try { req.validated(personal = true) } catch (e: InputError) {
+            return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
+        }
         if (!validAccountUuid(req.accountUuid)) return@patch call.respond(HttpStatusCode.BadRequest, MessageResponse("account uuid must be a UUID"))
-        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, req.coefficient, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold, accountUuid = req.accountUuid)
+        AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, v.kind, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold,
+            accountUuid = req.accountUuid, apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle)
+        applyProxy(aid, req.proxy)
         pool.reload()
         call.respond(buildOwnedStats(pool, uid))
     }
@@ -928,7 +940,7 @@ private suspend fun liveWindowSamples(
         .flatMap { acct ->
             org.claudeproxy.model.WindowKind.entries.mapNotNull { kind ->
                 acct.limit.window(kind)?.utilization?.let { util ->
-                    org.claudeproxy.repo.WindowSample(acct.id, kind.code, ts, util, acct.coefficient)
+                    org.claudeproxy.repo.WindowSample(acct.id, kind.code, ts, util)
                 }
             }
         }
@@ -975,37 +987,33 @@ internal fun planWindowBuckets(
 
 /**
  * Pure bucketing/aggregation for the window-utilization charts — split out of [buildWindows] so
- * the sum + carry-forward + coefficient-weighting math is unit-testable without a DB. [samples]
- * are already filtered to the accounts that should contribute.
+ * the sum + carry-forward math is unit-testable without a DB. [samples] are already filtered to
+ * the accounts that should contribute.
  *
- * Each (account, window) is binned to per-bucket averages (raw utilization and coefficient×util,
- * using the coefficient frozen on each sample), then carried forward across gaps. Pool totals are
- * the **sum** across accounts of those carried series (so a multi-account pool can exceed 100%),
- * for both the raw and the ×coef-weighted variants.
+ * Each (account, window) is binned to per-bucket averages, then carried forward across gaps. Pool
+ * totals are the **sum** across accounts of those carried series (so a multi-account pool can
+ * exceed 100%).
  */
 internal fun aggregateWindows(
     samples: List<org.claudeproxy.repo.WindowSample>,
     startMs: Long, widthMs: Double, buckets: Int,
     labels: List<String>, includeAccounts: Boolean, names: Map<Int, String>,
 ): WindowStatsPayload {
-    // (accountId, kind) -> per-bucket [Σutil, Σ(coef·util), count]
+    // (accountId, kind) -> per-bucket [Σutil, count]
     val agg = HashMap<Pair<Int, String>, Array<DoubleArray>>()
     samples.forEach { s ->
         val i = ((s.ts.toEpochMilli() - startMs) / widthMs).toInt().coerceIn(0, buckets - 1)
-        val arr = agg.getOrPut(s.accountId to s.kind) {
-            arrayOf(DoubleArray(buckets), DoubleArray(buckets), DoubleArray(buckets))
-        }
+        val arr = agg.getOrPut(s.accountId to s.kind) { arrayOf(DoubleArray(buckets), DoubleArray(buckets)) }
         arr[0][i] += s.util
-        arr[1][i] += s.util * s.coef
-        arr[2][i] += 1.0
+        arr[1][i] += 1.0
     }
-    // per-bucket average of one accumulator lane (0 = util, 1 = coef·util), carried forward across gaps
-    fun series(key: Pair<Int, String>, lane: Int): List<Double?> {
+    // per-bucket average, carried forward across gaps
+    fun series(key: Pair<Int, String>): List<Double?> {
         val arr = agg[key] ?: return List(buckets) { null }
         val out = arrayOfNulls<Double>(buckets)
         var last: Double? = null
         for (i in 0 until buckets) {
-            if (arr[2][i] > 0) last = arr[lane][i] / arr[2][i]
+            if (arr[1][i] > 0) last = arr[0][i] / arr[1][i]
             out[i] = last
         }
         return out.toList()
@@ -1013,28 +1021,19 @@ internal fun aggregateWindows(
 
     val accountIds = agg.keys.map { it.first }.distinct().sorted()
     val perAccount = if (includeAccounts) accountIds.map { aid ->
-        WindowSeriesDto(
-            aid, names[aid],
-            series(aid to "5h", 0), series(aid to "7d", 0),
-            series(aid to "5h", 1), series(aid to "7d", 1),
-        )
+        WindowSeriesDto(aid, names[aid], series(aid to "5h"), series(aid to "7d"))
     } else emptyList()
 
-    // pool total = SUM across accounts of each account's carried series (raw or ×coef-weighted)
-    fun total(kind: String, lane: Int): List<Double?> {
-        val all = accountIds.map { series(it to kind, lane) }
+    // pool total = SUM across accounts of each account's carried series
+    fun total(kind: String): List<Double?> {
+        val all = accountIds.map { series(it to kind) }
         return (0 until buckets).map { i ->
             val vals = all.mapNotNull { it[i] }
             if (vals.isEmpty()) null else vals.sum()
         }
     }
 
-    return WindowStatsPayload(
-        labels,
-        total("5h", 0), total("7d", 0),
-        total("5h", 1), total("7d", 1),
-        perAccount, includeAccounts,
-    )
+    return WindowStatsPayload(labels, total("5h"), total("7d"), perAccount, includeAccounts)
 }
 
 /**
@@ -1087,13 +1086,13 @@ internal fun aggregateWindowDaily(
     val n = dayLabels.size
     val idx = dayLabels.withIndex().associate { (i, d) -> d to i }
     val eps = 1e-9
-    // accountId -> [5h per-day burn, 7d per-day burn, 5h per-day burn ×coefficient]
+    // accountId -> [5h per-day burn, 7d per-day burn]
     val perAcc = HashMap<Int, Array<DoubleArray>>()
 
     samples.groupBy { it.accountId to it.kind }.forEach { (key, list) ->
         val (accountId, kind) = key
         val lane = when (kind) { "5h" -> 0; "7d" -> 1; else -> return@forEach }
-        val lanes = perAcc.getOrPut(accountId) { arrayOf(DoubleArray(n), DoubleArray(n), DoubleArray(n)) }
+        val lanes = perAcc.getOrPut(accountId) { arrayOf(DoubleArray(n), DoubleArray(n)) }
         var prev: Double? = null
         list.sortedBy { it.ts }.forEach { s ->
             val p = prev
@@ -1103,11 +1102,6 @@ internal fun aggregateWindowDaily(
             if (delta > eps) {
                 val i = idx[s.ts.atZone(zone).toLocalDate().toString()] ?: return@forEach
                 lanes[lane][i] += delta
-                // Each step is a fraction of *this account's* window; scaling by the coefficient
-                // frozen on the sample restates it in base-subscription windows, so a ×5 and a ×1
-                // account become comparable. 5-hour only — the weekly window does not scale with
-                // the plan, so weighting it would invent capacity that isn't there.
-                if (lane == 0) lanes[2][i] += delta * s.coef
             }
         }
     }
@@ -1120,10 +1114,10 @@ internal fun aggregateWindowDaily(
     val perAccount = if (includeAccounts)
         perAcc.entries
             .sortedByDescending { it.value[0].sum() + it.value[1].sum() }
-            .map { (aid, k) -> WindowDailySeriesDto(aid, names[aid], k[0].toList(), k[1].toList(), k[2].toList()) }
+            .map { (aid, k) -> WindowDailySeriesDto(aid, names[aid], k[0].toList(), k[1].toList()) }
     else emptyList()
 
-    return WindowDailyPayload(dayLabels, total(0), total(1), total(2), perAccount, includeAccounts)
+    return WindowDailyPayload(dayLabels, total(0), total(1), perAccount, includeAccounts)
 }
 
 private fun Route.statsRoutes(pool: AccountPool) {
@@ -1362,8 +1356,8 @@ private fun io.ktor.server.application.ApplicationCall.zoneParam(): java.time.Zo
     parameters["tz"]?.let { runCatching { java.time.ZoneId.of(it) }.getOrNull() } ?: java.time.ZoneOffset.UTC
 
 /** The token response usually names the account; the profile is the fallback when it doesn't. */
-private suspend fun accountUuidAtLogin(result: ClaudeOAuth.TokenResult): String? =
-    result.accountUuid ?: runCatching { ClaudeOAuth.fetchAccountUuid(Http.client, result.accessToken) }.getOrNull()
+private suspend fun accountUuidAtLogin(result: ClaudeOAuth.TokenResult, proxy: org.claudeproxy.accounts.AccountProxy?): String? =
+    result.accountUuid ?: runCatching { ClaudeOAuth.fetchAccountUuid(Http.clientFor(proxy), result.accessToken) }.getOrNull()
 
 private val UUID_RE = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 

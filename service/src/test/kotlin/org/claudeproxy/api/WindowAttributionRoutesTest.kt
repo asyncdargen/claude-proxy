@@ -36,7 +36,7 @@ class WindowAttributionRoutesTest {
         try {
             val now=java.time.Instant.now()
             fun account(name: String, owner: Int? = null) =
-                org.claudeproxy.accounts.AccountRepo.create(name,org.claudeproxy.model.AccountType.OAUTH,null,1,0.9,1.0,
+                org.claudeproxy.accounts.AccountRepo.create(name,org.claudeproxy.model.AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,
                     org.claudeproxy.accounts.AccountSecret(accessToken="upstream-secret"),null,ownerId=owner)
             val shared=account("shared")
             val openai=account("weekly-only")

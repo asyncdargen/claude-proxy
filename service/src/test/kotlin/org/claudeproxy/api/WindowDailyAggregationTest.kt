@@ -23,7 +23,7 @@ class WindowDailyAggregationTest {
     ) = WindowSample(
         acct, kind,
         java.time.LocalDate.parse(days[day]).atTime(hour, minute).atZone(zone).toInstant(),
-        util, 1.0,
+        util,
     )
 
     private fun assertSeries(expected: List<Double>, actual: List<Double>, msg: String) {
@@ -73,7 +73,7 @@ class WindowDailyAggregationTest {
     @Test
     fun `a sample before the range acts as the baseline for the first day`() {
         // The last sample of the previous day continues the series: day 0 opens at 0.20, not 0.
-        val prior = WindowSample(1, "5h", Instant.parse("2026-07-19T23:30:00Z"), 0.20, 1.0)
+        val prior = WindowSample(1, "5h", Instant.parse("2026-07-19T23:30:00Z"), 0.20)
         val p = aggregate(listOf(prior, sample(1, 0, 2, 0.70)))
         assertSeries(listOf(0.5, 0.0, 0.0), p.totalFiveHour, "prior baseline")
     }
@@ -140,59 +140,5 @@ class WindowDailyAggregationTest {
             sample(1, 1, 9, 0.60), sample(1, 1, 1, 0.10), sample(1, 1, 5, 0.30),
         ))
         assertSeries(listOf(0.0, 0.5, 0.0), p.totalFiveHour, "reordered")
-    }
-
-    // ---- coefficient-weighted 5-hour burn (base-subscription scale) ----
-
-    /** Sample carrying an explicit capacity coefficient. */
-    private fun weighted(acct: Int, day: Int, hour: Int, util: Double, coef: Double, kind: String = "5h") =
-        WindowSample(
-            acct, kind,
-            java.time.LocalDate.parse(days[day]).atTime(hour, 0).atZone(ZoneOffset.UTC).toInstant(),
-            util, coef,
-        )
-
-    @Test
-    fun `weighted 5h burn restates each account's spend in base-subscription windows`() {
-        // acct1 is a x5 plan and burns 0.4 of its own window; acct2 is x1 and burns 0.4 of its own.
-        // Raw, they are equal. On the base scale acct1 spent 5x as much real capacity.
-        val samples = listOf(
-            weighted(1, 0, 1, 0.1, 5.0), weighted(1, 0, 3, 0.5, 5.0),
-            weighted(2, 0, 1, 0.1, 1.0), weighted(2, 0, 3, 0.5, 1.0),
-        )
-        val p = aggregate(samples)
-
-        assertSeries(listOf(0.8, 0.0, 0.0), p.totalFiveHour, "raw total")          // 0.4 + 0.4
-        assertSeries(listOf(2.4, 0.0, 0.0), p.totalFiveHourWeighted, "weighted")   // 0.4*5 + 0.4*1
-
-        val a1 = p.perAccount.single { it.accountId == 1 }
-        assertSeries(listOf(0.4, 0.0, 0.0), a1.fiveHour, "acct1 raw")
-        assertSeries(listOf(2.0, 0.0, 0.0), a1.fiveHourWeighted, "acct1 weighted")
-    }
-
-    @Test
-    fun `the weekly window is never weighted`() {
-        // The weekly budget is the same size on every plan, so a x20 account's weekly burn must not
-        // be inflated -- and there is deliberately no weighted weekly series to inflate.
-        val samples = listOf(
-            weighted(1, 0, 1, 0.1, 20.0, kind = "7d"),
-            weighted(1, 0, 5, 0.4, 20.0, kind = "7d"),
-        )
-        val p = aggregate(samples)
-
-        assertSeries(listOf(0.3, 0.0, 0.0), p.totalWeekly, "weekly stays raw")
-        // Weekly samples contribute nothing to the 5h lanes, weighted included.
-        assertSeries(listOf(0.0, 0.0, 0.0), p.totalFiveHourWeighted, "weekly must not leak into weighted 5h")
-    }
-
-    @Test
-    fun `a reset counts the fresh reading in full on the weighted scale too`() {
-        // 0.2 -> 0.9 -> 0.3 (reset): 0.7 then the whole 0.3 = 1.0 of its own window, x5 = 5.0.
-        val samples = listOf(
-            weighted(1, 0, 1, 0.2, 5.0), weighted(1, 0, 3, 0.9, 5.0), weighted(1, 0, 6, 0.3, 5.0),
-        )
-        val p = aggregate(samples)
-        assertSeries(listOf(1.0, 0.0, 0.0), p.totalFiveHour, "raw")
-        assertSeries(listOf(5.0, 0.0, 0.0), p.totalFiveHourWeighted, "weighted")
     }
 }

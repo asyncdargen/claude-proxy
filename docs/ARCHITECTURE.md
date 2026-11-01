@@ -4,8 +4,8 @@ An nginx router (in `docker-compose`) fronts three components on one origin:
 
 - **Datapath** — `/gateway/{...}` (nginx strips the prefix → `/v1/{...}`) transparently proxies
   the Anthropic API for Claude Code. Served by the Go **gateway**. The Kotlin **service** still
-  contains a full datapath, kept as an instant rollback: flipping one nginx `proxy_pass` back to
-  `service:8787` reverts it.
+  contains a full datapath, kept as an instant rollback: setting `DATAPATH_UPSTREAM=service:8787` on the web
+  container reverts it.
 - **API routing** — `/routing/openai/{...}` and `/routing/anthropic/{...}` expose the standard
   OpenAI and Anthropic contracts to arbitrary clients, served from the same account pool by the
   same Go **gateway** binary, mounted under those path prefixes. Usage is tagged `source="routing"` and
@@ -47,8 +47,10 @@ back. They never touch the database.
 
 ## Account selection & rotation
 
-- Accounts have `priority`, `threshold` (0..1), `coefficient` (×1/×5/×20 capacity weight),
-  `enabled`, `health`, and per-window live `utilization`.
+- Accounts have `priority`, `threshold` (0..1), `kind` (plan: NONE/PRO/MAX/ULTRA — headroom
+  weight only), `enabled`, `health`, an optional outbound proxy, and per-window live
+  `utilization`. API keys carry no windows or threshold; they also take `api_key_mode`,
+  `base_url` and `api_auth_style`.
 - **Usage fraction** driving selection = max utilization across known windows (`LimitState`).
 - Order: accounts **under** their threshold first (by priority), then the ones that opted into
   `over_threshold` (**fallback**), then over-threshold accounts without the flag as a last resort
@@ -63,7 +65,8 @@ back. They never touch the database.
 ## Data model (Exposed, `db/Tables.kt`)
 
 - `users`, `roles`, `role_permissions`, `user_roles` — RBAC.
-- `accounts` (priority/threshold/coefficient/health/type/groupId/clientId) + `account_secrets`
+- `accounts` (priority/threshold/kind/health/type/groupId/clientId, api_key_mode/base_url/
+  api_auth_style, proxy_type/host/port/username/password_cipher) + `account_secrets`
   (AES-256-GCM ciphertext), `account_limits` (per-window utilization), `window_snapshots`
   (time series for the usage graphs).
 - `account_groups`, `user_group_access` — per-user routing scope.
@@ -141,7 +144,7 @@ What lives where:
   each turn.
 
 Streaming is as timing-sensitive here as on the Anthropic datapath, so `/api/chat/stream` gets its
-own nginx location with `proxy_buffering off` (see `deploy/nginx/nginx.conf`).
+own nginx location with `proxy_buffering off` (see `deploy/web/default.conf.template`).
 
 ## Auth & RBAC
 
@@ -152,8 +155,8 @@ own nginx location with `proxy_buffering off` (see `deploy/nginx/nginx.conf`).
 
 ## Frontend
 
-React 18 + Vite + TS in `frontend/src/`, built to `frontend/dist` and served by the `front`
-image. Section URLs use **react-router-dom** (`/chat`, `/dashboard`, `/my/accounts`, `/my/stats`,
+React 18 + Vite + TS in `frontend/src/`, built to `frontend/dist` and served by the `web`
+image (nginx, which is also the router). Section URLs use **react-router-dom** (`/chat`, `/dashboard`, `/my/accounts`, `/my/stats`,
 `/stats`, `/tokens`, `/pricing`, `/users`); nginx `try_files` falls unknown paths back to
 `index.html`. Pages: Chat, Dashboard (pool), Tokens, API Routing, Stats (cost + window-utilization
 SVG charts), MyStats / UserStats (the shared `UserStatsView`), MyAccounts, ModelPricing, Users,

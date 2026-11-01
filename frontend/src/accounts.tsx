@@ -2,7 +2,7 @@
 // management. Used by the Dashboard (global pool), My Accounts (personal) and the
 // admin oversight view on the Users page.
 import { ReactNode, useState } from 'react';
-import { AccountDto, api, fmtReset, fmtTokens, fmtUsd, GroupDto, OverageDto, PoolStats, WindowLimitDto } from './api';
+import { AccountDto, AccountKind, AccountProxyDto, ApiAuthStyle, ApiKeyMode, api, fmtReset, fmtTokens, fmtUsd, GroupDto, OverageDto, PoolStats, ProxyType, WindowLimitDto } from './api';
 import { Modal, NumberInput, Segmented, Switch } from './ui';
 
 /** The scope-specific API calls a table/modal needs. Bound to the global or personal endpoints. */
@@ -59,9 +59,31 @@ function WindowCell({ w, isApi, overage }: { w: WindowLimitDto | null; isApi: bo
   );
 }
 
+/** Plan badge for subscriptions, request profile for API keys. */
+function planBadge(a: AccountDto) {
+  if (a.type === 'API_KEY') return <span className="badge muted" title="API key / token — billed per token, no subscription windows">API · {MODE_LABEL[a.apiKeyMode ?? 'CLAUDE_CODE']}</span>;
+  const k = a.kind ?? 'NONE';
+  if (k === 'NONE') return <span className="badge muted" title={`${a.type.toLowerCase()} — plan not set`}>{a.type === 'OAUTH_STATIC' ? 'oauth static' : 'oauth'}</span>;
+  return <span className={`badge plan plan-${k.toLowerCase()}`} title={KIND_HINT[k]}>{KIND_LABEL[k]}</span>;
+}
+
+/** What an API key talks to, in place of the two window columns it does not have. */
+function ApiUpstreamCell({ a }: { a: AccountDto }) {
+  const host = hostOf(a.baseUrl);
+  return (
+    <div className="api-upstream">
+      <span className="mono">{host ?? 'api.anthropic.com'}</span>
+      <span className="hint">{a.apiAuthStyle === 'BEARER' ? 'bearer token' : 'x-api-key'} · key checked every probe, no windows</span>
+    </div>
+  );
+}
+
 function healthBadge(a: AccountDto) {
   const cls = !a.enabled ? 'muted' : a.health === 'OK' ? 'ok' : a.health === 'REFRESH_FAILED' ? 'warn' : 'bad';
-  const label = !a.enabled ? 'disabled' : a.rateLimitedUntil && new Date(a.rateLimitedUntil) > new Date() ? 'limited' : a.health.toLowerCase().replace('_', ' ');
+  const limited = a.rateLimitedUntil && new Date(a.rateLimitedUntil) > new Date();
+  // an API key that fails its check is not a refresh problem — there is nothing to refresh
+  const label = !a.enabled ? 'disabled' : limited ? 'limited'
+    : a.type === 'API_KEY' && a.health !== 'OK' ? 'key rejected' : a.health.toLowerCase().replace('_', ' ');
   return <span className={`badge ${cls}`}>{label}</span>;
 }
 
@@ -128,13 +150,14 @@ function graceBadge(a: AccountDto) {
 
 /* ---------------------------------------------------------------- summary cards */
 
-// Coefficient-weighted pool headroom, shown as a percent: each account's remaining fraction is
-// multiplied by its coefficient and summed (Σ coefficient × (1 − usage)), so a ×20 account
-// contributes up to 2000%. The figure can exceed 100% and is shown out of the pool's Σ coefficient
-// capacity. The normalized "% of capacity left" (always 0..100%) stays on hover.
+// Pool headroom in Pro-sized windows, shown as a percent: each subscription's remaining fraction is
+// weighted by its plan (Pro ×1, Max ×5, Ultra ×20 for 5 hours / ×10 weekly) and summed, so an
+// Ultra account contributes up to 2000%. The figure can exceed 100% and is shown out of the pool's
+// total plan capacity; API keys have no windows and are left out. The normalized "% of capacity
+// left" (always 0..100%) stays on hover.
 const fmtPct = (n: number) => `${Math.round(n * 100)}%`;
 
-/** Headroom card: coefficient-weighted remaining as a percent, out of Σ-coefficient capacity. */
+/** Headroom card: plan-weighted remaining as a percent, out of the pool's plan capacity. */
 function HeadroomCard({ label, s }: { label: ReactNode; s: PoolStats }) {
   const capPct = s.totalEffectiveCapacity > 0 ? s.totalEffectiveRemaining / s.totalEffectiveCapacity : 0;
   const wkPct = s.totalWeeklyCapacity > 0 ? s.totalWeeklyRemaining / s.totalWeeklyCapacity : 0;
@@ -240,14 +263,14 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
 }) {
   const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
   const [hover, setHover] = useState<HoverState | null>(null);
-  const cols = 8 + (showGroup ? 1 : 0) + (canManage ? 1 : 0);
+  const cols = 7 + (showGroup ? 1 : 0) + (canManage ? 1 : 0);
   return (
     <div className="tablewrap">
       <table>
         <thead>
           <tr>
-            <th>Prio</th><th>Name</th>{showGroup && <th>Group</th>}<th>Type</th>
-            <th>5-hour</th><th>Weekly</th><th>Coef</th>
+            <th>Prio</th><th>Name</th>{showGroup && <th>Group</th>}<th>Plan</th>
+            <th>5-hour</th><th>Weekly</th>
             <th className="num">Total</th><th>Status</th>{canManage && <th></th>}
           </tr>
         </thead>
@@ -257,12 +280,23 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
             return (
             <tr key={a.id}>
               <td className="num">{a.priority}</td>
-              <td>{a.name} {a.id === stats.activeAccountId && <span className="badge active">active</span>}</td>
+              <td>
+                <div className="acct-name">
+                  <span>{a.name}</span>
+                  {a.id === stats.activeAccountId && <span className="badge active">active</span>}
+                  {a.proxy && <span className="badge muted mono" title={`Outbound ${a.proxy.type} proxy ${a.proxy.host}:${a.proxy.port}${a.proxy.username ? ` (user ${a.proxy.username})` : ''}`}>⇄ {a.proxy.type === 'SOCKS5' ? 'socks5' : 'http'} {a.proxy.host}</span>}
+                </div>
+              </td>
               {showGroup && <td>{a.groupId ? <span className="grouptag">{groupName(a.groupId) ?? `#${a.groupId}`}</span> : <span className="hint">—</span>}</td>}
-              <td><span className="badge muted">{a.type.toLowerCase()}</span></td>
-              <td><WindowCell w={a.fiveHour} isApi={a.type === 'API_KEY'} /></td>
-              <td><WindowCell w={a.weekly} isApi={a.type === 'API_KEY'} overage={a.overage} /></td>
-              <td className="num">×{a.coefficient}</td>
+              <td>{planBadge(a)}</td>
+              {a.type === 'API_KEY'
+                ? <td colSpan={2}><ApiUpstreamCell a={a} /></td>
+                : <>
+                    <td>{a.fiveHourLimited === false
+                      ? <span className="badge muted" title="This plan has no 5-hour window — Anthropic reports only the weekly limit (verified Ultra).">no 5h limit</span>
+                      : <WindowCell w={a.fiveHour} isApi={false} />}</td>
+                    <td><WindowCell w={a.weekly} isApi={false} overage={a.overage} /></td>
+                  </>}
               <td className="num totalcell"
                 onMouseEnter={(e) => setHover({ a, x: e.clientX, y: e.clientY })}
                 onMouseMove={(e) => setHover({ a, x: e.clientX, y: e.clientY })}
@@ -347,6 +381,124 @@ export function GroupsModal({ groups, onChange, onAccountsChange, onClose }: {
   );
 }
 
+/* ---------------------------------------------------------------- form pieces */
+
+export const KIND_LABEL: Record<AccountKind, string> = { NONE: 'None', PRO: 'Pro', MAX: 'Max', ULTRA: 'Ultra' };
+const KIND_HINT: Record<AccountKind, string> = {
+  NONE: 'Plan unknown — counts as one Pro-sized window in pool headroom.',
+  PRO: 'Pro: 5-hour session window + weekly limit.',
+  MAX: 'Max (formerly Max 5x): 5× Pro in both windows.',
+  ULTRA: 'Ultra (formerly Max 20x): weekly limit 10× Pro; verified accounts have no 5-hour window.',
+};
+const MODE_LABEL: Record<ApiKeyMode, string> = { ANTHROPIC_API: 'Anthropic API', AGENT_SDK: 'Agent SDK', CLAUDE_CODE: 'Claude Code' };
+const MODE_HINT: Record<ApiKeyMode, string> = {
+  CLAUDE_CODE: 'Forwarded exactly as Claude Code sent it (CLI identity kept). Right for Console keys used as Claude Code, and for another Claude Code proxy.',
+  AGENT_SDK: 'Presented as the Claude Agent SDK: SDK user agent and system line, no billing header. Plan-included API credits cover Agent SDK traffic.',
+  ANTHROPIC_API: 'A plain Messages API call: Claude Code prompt, identity metadata and CLI headers are stripped.',
+};
+
+function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try { return new URL(url).host; } catch { return url; }
+}
+
+/** Kind picker shown for subscriptions only. */
+function KindField({ value, onChange }: { value: AccountKind; onChange: (k: AccountKind) => void }) {
+  return (
+    <div className="field">
+      <span>Plan</span>
+      <Segmented<AccountKind> value={value} onChange={onChange}
+        options={(['NONE', 'PRO', 'MAX', 'ULTRA'] as AccountKind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }))} />
+      <small className="hint field-note">{KIND_HINT[value]}</small>
+    </div>
+  );
+}
+
+interface ApiFieldsState { mode: ApiKeyMode; baseUrl: string; authStyle: ApiAuthStyle }
+
+/** Request profile + custom upstream for an API key. */
+function ApiFields({ v, onChange }: { v: ApiFieldsState; onChange: (v: ApiFieldsState) => void }) {
+  return (
+    <fieldset className="form-section">
+      <legend>Upstream</legend>
+      <label className="field"><span>Base URL <small className="hint">— empty = api.anthropic.com</small></span>
+        <input className="mono" value={v.baseUrl} onChange={(e) => onChange({ ...v, baseUrl: e.target.value })}
+          placeholder="https://other-proxy.example.com/gateway" />
+        <small className="hint field-note">Any Anthropic-compatible endpoint — another Claude Code proxy, a corporate gateway. Requests go to <span className="mono">{'<base>'}/v1/…</span>.</small>
+      </label>
+      <div className="field">
+        <span>Send the key as</span>
+        <Segmented<ApiAuthStyle> value={v.authStyle} onChange={(authStyle) => onChange({ ...v, authStyle })} options={[
+          { value: 'X_API_KEY', label: 'x-api-key' },
+          { value: 'BEARER', label: 'Authorization: Bearer' },
+        ]} />
+      </div>
+      <div className="field">
+        <span>Request profile</span>
+        <Segmented<ApiKeyMode> value={v.mode} onChange={(mode) => onChange({ ...v, mode })}
+          options={(['CLAUDE_CODE', 'AGENT_SDK', 'ANTHROPIC_API'] as ApiKeyMode[]).map((m) => ({ value: m, label: MODE_LABEL[m] }))} />
+        <small className="hint field-note">{MODE_HINT[v.mode]}</small>
+      </div>
+    </fieldset>
+  );
+}
+
+interface ProxyState { type: ProxyType; host: string; port: number; username: string; password: string; clearPassword: boolean }
+
+const DEFAULT_PORT: Record<ProxyType, number> = { NONE: 0, HTTP: 3128, SOCKS5: 1080 };
+
+function proxyState(p: AccountProxyDto | null | undefined): ProxyState {
+  return p
+    ? { type: p.type, host: p.host, port: p.port, username: p.username ?? '', password: '', clearPassword: false }
+    : { type: 'NONE', host: '', port: 0, username: '', password: '', clearPassword: false };
+}
+
+/** Request body for the proxy; password null = keep what is stored. */
+function proxyBody(p: ProxyState, stored?: AccountProxyDto | null) {
+  if (p.type === 'NONE') return { type: 'NONE' };
+  const password = p.clearPassword ? '' : p.password !== '' ? p.password : stored ? null : '';
+  return { type: p.type, host: p.host.trim(), port: p.port, username: p.username.trim(), password };
+}
+
+/** Outbound proxy for every upstream call of this account. */
+function ProxyFields({ v, stored, onChange }: { v: ProxyState; stored?: AccountProxyDto | null; onChange: (v: ProxyState) => void }) {
+  const set = (patch: Partial<ProxyState>) => onChange({ ...v, ...patch });
+  return (
+    <fieldset className="form-section">
+      <legend>Outbound proxy</legend>
+      <div className="field">
+        <Segmented<ProxyType> value={v.type}
+          onChange={(type) => set({ type, port: v.port && v.type !== 'NONE' ? v.port : DEFAULT_PORT[type] })}
+          options={[{ value: 'NONE', label: 'Direct' }, { value: 'HTTP', label: 'HTTP' }, { value: 'SOCKS5', label: 'SOCKS5' }]} />
+        <small className="hint field-note">
+          {v.type === 'NONE'
+            ? 'Requests leave from the server itself (or the deployment-wide ANTHROPIC_PROXY_URL).'
+            : `Inference, chat, limit probes and token refresh for this account all go through this proxy${v.type === 'SOCKS5' ? '; hostnames are resolved by the proxy' : ' (HTTP CONNECT)'}. It never falls back to direct.`}
+        </small>
+      </div>
+      {v.type !== 'NONE' && (
+        <>
+          <div className="grid-host">
+            <label className="field"><span>Host</span><input className="mono" value={v.host} onChange={(e) => set({ host: e.target.value })} placeholder="proxy.example.com" /></label>
+            <label className="field"><span>Port</span><NumberInput value={v.port} onChange={(port) => set({ port: Math.trunc(port) })} min={1} max={65535} /></label>
+          </div>
+          <div className="grid2">
+            <label className="field"><span>Username <small className="hint">optional</small></span><input value={v.username} onChange={(e) => set({ username: e.target.value })} autoComplete="off" /></label>
+            <label className="field"><span>Password</span>
+              <input type="password" value={v.password} disabled={v.clearPassword} autoComplete="new-password"
+                onChange={(e) => set({ password: e.target.value })}
+                placeholder={stored?.hasPassword && !v.clearPassword ? '•••••• stored — empty keeps it' : ''} />
+            </label>
+          </div>
+          {stored?.hasPassword && (
+            <label className="field switch-field"><span>Remove stored password</span><Switch checked={v.clearPassword} onChange={(clearPassword) => set({ clearPassword, password: '' })} /></label>
+          )}
+        </>
+      )}
+    </fieldset>
+  );
+}
+
 /* ---------------------------------------------------------------- edit modal */
 
 export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }: {
@@ -356,12 +508,16 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
   const [name, setName] = useState(a.name);
   const [prio, setPrio] = useState(a.priority);
   const [thrPct, setThrPct] = useState(Math.round(a.threshold * 100));
-  const [coef, setCoef] = useState(a.coefficient);
+  const [kind, setKind] = useState<AccountKind>(a.kind ?? 'NONE');
   const [overThreshold, setOverThreshold] = useState(a.overThreshold);
   const [group, setGroup] = useState<number | null>(a.groupId);
   const [deviceId, setDeviceId] = useState(a.deviceId ?? '');
   const [accountUuid, setAccountUuid] = useState(a.accountUuid ?? '');
-  const isOAuth = a.type !== 'API_KEY';
+  const [apiFields, setApiFields] = useState<ApiFieldsState>({
+    mode: a.apiKeyMode ?? 'CLAUDE_CODE', baseUrl: a.baseUrl ?? '', authStyle: a.apiAuthStyle ?? 'X_API_KEY',
+  });
+  const [proxy, setProxy] = useState<ProxyState>(proxyState(a.proxy));
+  const isApi = a.type === 'API_KEY';
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const isGlobal = scope === 'global';
@@ -369,10 +525,17 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
   async function save() {
     setBusy(true); setErr(null);
     try {
-      const body: any = { name, priority: prio, threshold: thrPct / 100, coefficient: coef, overThreshold, deviceId: deviceId.trim() || undefined };
+      const body: any = { name, priority: prio, deviceId: deviceId.trim() || undefined, proxy: proxyBody(proxy, a.proxy) };
+      if (isApi) {
+        body.apiKeyMode = apiFields.mode;
+        body.baseUrl = apiFields.baseUrl.trim(); // "" = back to api.anthropic.com
+        body.apiAuthStyle = apiFields.authStyle;
+      } else {
+        Object.assign(body, { threshold: thrPct / 100, kind, overThreshold });
+        // "" clears it; the next token refresh looks it up again from the profile when it can.
+        if (accountUuid.trim() !== (a.accountUuid ?? '')) body.accountUuid = accountUuid.trim();
+      }
       if (isGlobal) { body.groupId = group; body.clearGroup = group == null; }
-      // "" clears it; the next token refresh looks it up again from the profile when it can.
-      if (isOAuth && accountUuid.trim() !== (a.accountUuid ?? '')) body.accountUuid = accountUuid.trim();
       onSaved(await update(a.id, body));
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
@@ -381,30 +544,42 @@ export function AccountEditModal({ a, groups, scope, update, onClose, onSaved }:
     const b = new Uint8Array(32); crypto.getRandomValues(b);
     setDeviceId(Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''));
   }
+  // The device id only reaches upstream inside Claude Code's metadata, which an API-profile key strips.
+  const showDevice = !isApi || apiFields.mode !== 'ANTHROPIC_API';
 
   return (
-    <Modal title={`Edit ${a.name}`} onClose={onClose}
+    <Modal title={`Edit ${a.name}`} onClose={onClose} width={600}
       footer={<><button className="ghost" onClick={onClose}>Cancel</button><button disabled={busy} onClick={save}>{busy ? '…' : 'Save'}</button></>}>
       <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
       <div className="grid2">
         <label className="field"><span>Priority (lower = used first)</span><NumberInput value={prio} onChange={(v) => setPrio(Math.trunc(v))} allowNegative /></label>
         {isGlobal && <label className="field"><span>Group</span><GroupSelect value={group} groups={groups} onChange={setGroup} /></label>}
-        <label className="field"><span>Threshold (%)</span><NumberInput value={thrPct} onChange={setThrPct} min={0} max={100} /></label>
-        <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><NumberInput value={coef} onChange={setCoef} min={0} step={0.5} /></label>
+        {!isApi && <label className="field"><span>Threshold (%)</span><NumberInput value={thrPct} onChange={setThrPct} min={0} max={100} /></label>}
       </div>
-      <label className="field switch-field">
-        <span>Over-threshold fallback<br /><small className="hint">Keep using this account past its threshold when every account is saturated. Off by default.</small></span>
-        <Switch checked={overThreshold} onChange={setOverThreshold} />
-      </label>
-      <label className="field"><span>Device ID (per-account fingerprint sent in request body)</span>
-        <div className="row"><input className="mono" value={deviceId} onChange={(e) => setDeviceId(e.target.value)} placeholder="64 hex chars" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
-      </label>
-      {isOAuth && (
-        <label className="field"><span>Account UUID (Anthropic account sent in request metadata)<br /><small className="hint">Filled in at login or from the profile; set by hand for tokens without the profile scope.</small></span>
-          <input className="mono" value={accountUuid} onChange={(e) => setAccountUuid(e.target.value)} placeholder="not known yet" />
-        </label>
+      {isApi ? <ApiFields v={apiFields} onChange={setApiFields} /> : (
+        <>
+          <KindField value={kind} onChange={setKind} />
+          <label className="field switch-field">
+            <span>Over-threshold fallback<br /><small className="hint">Keep using this account past its threshold when every account is saturated. Off by default.</small></span>
+            <Switch checked={overThreshold} onChange={setOverThreshold} />
+          </label>
+        </>
       )}
-      <p className="hint">Type <b>{a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
+      <ProxyFields v={proxy} stored={a.proxy} onChange={setProxy} />
+      <details className="form-advanced">
+        <summary>Identity</summary>
+        {showDevice && (
+          <label className="field"><span>Device ID (per-account fingerprint sent in request body)</span>
+            <div className="row"><input className="mono" value={deviceId} onChange={(e) => setDeviceId(e.target.value)} placeholder="64 hex chars" /><button className="ghost sm" onClick={regen} type="button">Regenerate</button></div>
+          </label>
+        )}
+        {!isApi && (
+          <label className="field"><span>Account UUID (Anthropic account sent in request metadata)<br /><small className="hint">Filled in at login or from the profile; set by hand for tokens without the profile scope.</small></span>
+            <input className="mono" value={accountUuid} onChange={(e) => setAccountUuid(e.target.value)} placeholder="not known yet" />
+          </label>
+        )}
+      </details>
+      <p className="hint">Type <b>{a.type === 'API_KEY' ? 'API key' : a.type.toLowerCase()}</b> · created {new Date(a.createdAt).toLocaleString()}</p>
       {err && <div className="err">{err}</div>}
     </Modal>
   );
@@ -422,9 +597,11 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   const [groupId, setGroupId] = useState<number | null>(null);
   const [priority, setPriority] = useState(100);
   const [thresholdPct, setThresholdPct] = useState(90);
-  const [coefficient, setCoefficient] = useState(1);
+  const [kind, setKind] = useState<AccountKind>('MAX');
+  const [proxy, setProxy] = useState<ProxyState>(proxyState(null));
   // credential fields
   const [type, setType] = useState('API_KEY');
+  const [apiFields, setApiFields] = useState<ApiFieldsState>({ mode: 'CLAUDE_CODE', baseUrl: '', authStyle: 'X_API_KEY' });
   const [apiKey, setApiKey] = useState('');
   const [accessToken, setAccessToken] = useState('');
   const [refreshToken, setRefreshToken] = useState('');
@@ -436,13 +613,18 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   const [err, setErr] = useState<string | null>(null);
 
   const groupBody = () => (isGlobal ? { groupId } : {});
+  const isApi = method === 'cred' && type === 'API_KEY';
 
   async function submitCred() {
     setBusy(true); setErr(null);
     try {
-      const body: any = { name, type, priority, threshold: thresholdPct / 100, coefficient, ...groupBody() };
-      if (type === 'API_KEY') body.apiKey = apiKey;
-      else { body.accessToken = accessToken; if (refreshToken) body.refreshToken = refreshToken; }
+      const body: any = { name, type, priority, proxy: proxyBody(proxy), ...groupBody() };
+      if (type === 'API_KEY') {
+        Object.assign(body, { apiKey, apiKeyMode: apiFields.mode, baseUrl: apiFields.baseUrl.trim() || undefined, apiAuthStyle: apiFields.authStyle });
+      } else {
+        Object.assign(body, { accessToken, threshold: thresholdPct / 100, kind });
+        if (refreshToken) body.refreshToken = refreshToken;
+      }
       onDone(await accountApi.create(body));
       onClose();
     } catch (e: any) { setErr(e.message); setBusy(false); }
@@ -455,7 +637,7 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
   async function completeOauth() {
     if (!oauthState) return; setBusy(true); setErr(null);
     try {
-      onDone(await accountApi.oauthComplete({ state: oauthState, code, name, priority, threshold: thresholdPct / 100, coefficient, ...groupBody() }));
+      onDone(await accountApi.oauthComplete({ state: oauthState, code, name, priority, threshold: thresholdPct / 100, kind, proxy: proxyBody(proxy), ...groupBody() }));
       onClose();
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
@@ -467,7 +649,7 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
       : <><button className="ghost" onClick={onClose}>Cancel</button><button disabled={busy} onClick={completeOauth}>{busy ? '…' : 'Complete & add'}</button></>;
 
   return (
-    <Modal title={isGlobal ? 'Add account' : 'Add my account'} onClose={onClose} footer={footer} width={560}>
+    <Modal title={isGlobal ? 'Add account' : 'Add my account'} onClose={onClose} footer={footer} width={600}>
       <div style={{ marginBottom: 14 }}>
         <Segmented<'cred' | 'oauth'> value={method} onChange={(m) => { setMethod(m); setErr(null); }} options={[
           { value: 'cred', label: 'By credential' },
@@ -477,26 +659,30 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
 
       {method === 'cred' ? (
         <>
-          <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. max-account-1" /></label>
+          <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder={isApi ? 'e.g. console-key-1' : 'e.g. max-account-1'} /></label>
           <div className="grid2">
             <label className="field"><span>Type</span>
               <select value={type} onChange={(e) => setType(e.target.value)}>
-                <option value="API_KEY">API key (x-api-key)</option>
+                <option value="API_KEY">API key / token</option>
                 <option value="OAUTH">OAuth (access + refresh)</option>
                 <option value="OAUTH_STATIC">OAuth (access only)</option>
               </select>
             </label>
             {isGlobal && <label className="field"><span>Group</span><GroupSelect value={groupId} groups={groups} onChange={setGroupId} /></label>}
             <label className="field"><span>Priority (lower = first)</span><NumberInput value={priority} onChange={(v) => setPriority(Math.trunc(v))} allowNegative /></label>
-            <label className="field"><span>Threshold (%)</span><NumberInput value={thresholdPct} onChange={setThresholdPct} min={0} max={100} /></label>
-            <label className="field"><span>Coefficient (×1 / ×5 / ×20)</span><NumberInput value={coefficient} onChange={setCoefficient} min={0} step={0.5} /></label>
+            {!isApi && <label className="field"><span>Threshold (%)</span><NumberInput value={thresholdPct} onChange={setThresholdPct} min={0} max={100} /></label>}
           </div>
-          {type === 'API_KEY'
-            ? <label className="field"><span>API key</span><input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-api03-…" /></label>
+          {isApi
+            ? <>
+                <label className="field"><span>API key / token</span><input className="mono" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-api03-… or another proxy's token" autoComplete="off" /></label>
+                <ApiFields v={apiFields} onChange={setApiFields} />
+              </>
             : <>
-                <label className="field"><span>Access token</span><input value={accessToken} onChange={(e) => setAccessToken(e.target.value)} placeholder="sk-ant-oat01-…" /></label>
-                {type === 'OAUTH' && <label className="field"><span>Refresh token</span><input value={refreshToken} onChange={(e) => setRefreshToken(e.target.value)} placeholder="sk-ant-ort01-…" /></label>}
+                <KindField value={kind} onChange={setKind} />
+                <label className="field"><span>Access token</span><input className="mono" value={accessToken} onChange={(e) => setAccessToken(e.target.value)} placeholder="sk-ant-oat01-…" /></label>
+                {type === 'OAUTH' && <label className="field"><span>Refresh token</span><input className="mono" value={refreshToken} onChange={(e) => setRefreshToken(e.target.value)} placeholder="sk-ant-ort01-…" /></label>}
               </>}
+          <ProxyFields v={proxy} onChange={setProxy} />
         </>
       ) : (
         <>
@@ -509,8 +695,9 @@ export function AddAccountModal({ scope, groups, accountApi, onClose, onDone }: 
           <div className="grid2">
             {isGlobal && <label className="field"><span>Group</span><GroupSelect value={groupId} groups={groups} onChange={setGroupId} /></label>}
             <label className="field"><span>Priority</span><NumberInput value={priority} onChange={(v) => setPriority(Math.trunc(v))} allowNegative /></label>
-            <label className="field"><span>Coefficient</span><NumberInput value={coefficient} onChange={setCoefficient} min={0} step={0.5} /></label>
           </div>
+          <KindField value={kind} onChange={setKind} />
+          <ProxyFields v={proxy} onChange={setProxy} />
           {oauthState && <label className="field"><span>Authorization code</span><input value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste code (or code#state)" /></label>}
         </>
       )}

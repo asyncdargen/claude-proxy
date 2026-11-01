@@ -85,7 +85,7 @@ class UpstreamForwarder(
         allowedGroups: Set<Int>? = null,
     ): ForwardResult {
         val method = call.request.httpMethod
-        val url = "$upstreamBaseUrl$pathAndQuery"
+        val url = "${account.upstreamBaseUrl ?: upstreamBaseUrl}$pathAndQuery"
 
         // Per-account identity: rotate the session-id and stamp this account's device-id into
         // the body's metadata. Cheap (cached) DB lookup; no-op for bodies without metadata.
@@ -97,7 +97,7 @@ class UpstreamForwarder(
         ) { origin -> org.claudeproxy.repo.SessionMapRepo.resolve(origin, account.id) }
         val outBody = rewritten.body
 
-        val statement = Http.client.prepareRequest(url) {
+        val statement = Http.clientFor(account).prepareRequest(url) {
             this.method = method
             // copy through client headers except stripped + telemetry ones
             call.request.headers.forEach { name, values ->
@@ -108,6 +108,7 @@ class UpstreamForwarder(
             }
             // Re-emit the session-id header with this account's rotated value.
             rewritten.sessionId?.let { header("X-Claude-Code-Session-Id", it) }
+            org.claudeproxy.accounts.UpstreamAuth.applyApiKeyMode(this, account.type, account.apiKeyMode)
             applyAuth(this, account)
             // Anthropic requires this header; inject a default if the client omitted it.
             if (call.request.headers["anthropic-version"] == null) {
@@ -327,7 +328,7 @@ class UpstreamForwarder(
     }
 
     private fun applyAuth(builder: io.ktor.client.request.HttpRequestBuilder, account: AccountRuntime) {
-        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account.type, account.secret)
+        org.claudeproxy.accounts.UpstreamAuth.apply(builder, account)
     }
 
 

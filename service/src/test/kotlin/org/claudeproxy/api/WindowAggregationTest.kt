@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 /**
  * [aggregateWindows] is a pure function over the sample list, so we exercise the sum +
- * carry-forward + coefficient-weighting math without any DB or route wiring.
+ * carry-forward math without any DB or route wiring.
  */
 class WindowAggregationTest {
     // 4 one-second buckets starting at epoch 0.
@@ -17,8 +17,8 @@ class WindowAggregationTest {
     private val buckets = 4
     private val labels = (0 until buckets).map { "b$it" }
 
-    private fun sample(acct: Int, bucket: Int, util: Double, coef: Double, kind: String = "5h") =
-        WindowSample(acct, kind, Instant.ofEpochMilli(bucket * 1000L + 10), util, coef)
+    private fun sample(acct: Int, bucket: Int, util: Double, kind: String = "5h") =
+        WindowSample(acct, kind, Instant.ofEpochMilli(bucket * 1000L + 10), util)
 
     private fun assertSeries(expected: List<Double?>, actual: List<Double?>, msg: String) {
         assertEquals(expected.size, actual.size, "$msg: size")
@@ -32,47 +32,32 @@ class WindowAggregationTest {
 
     @Test
     fun `pool total sums utilization across accounts and carries forward across gaps`() {
-        // acct1 (×1): b0=0.5, b2=0.2 ; acct2 (×5): b0=0.8, b3=0.1 ; b1 is a gap for both.
+        // acct1: b0=0.5, b2=0.2 ; acct2: b0=0.8, b3=0.1 ; b1 is a gap for both.
         val samples = listOf(
-            sample(1, 0, 0.5, 1.0), sample(1, 2, 0.2, 1.0),
-            sample(2, 0, 0.8, 5.0), sample(2, 3, 0.1, 5.0),
+            sample(1, 0, 0.5), sample(1, 2, 0.2),
+            sample(2, 0, 0.8), sample(2, 3, 0.1),
         )
         val p = aggregateWindows(samples, startMs, widthMs, buckets, labels, includeAccounts = true, names = emptyMap())
 
         // raw = Σ util (carry-forward fills b1 with the last value)
         assertSeries(listOf(1.3, 1.3, 1.0, 0.3), p.totalFiveHour, "totalFiveHour")
-        // weighted = Σ coef·util
-        assertSeries(listOf(4.5, 4.5, 4.2, 0.7), p.totalFiveHourWeighted, "totalFiveHourWeighted")
         // weekly untouched (no 7d samples)
         assertSeries(listOf(null, null, null, null), p.totalWeekly, "totalWeekly")
     }
 
     @Test
-    fun `per-account weighted series is coefficient times utilization`() {
-        val samples = listOf(sample(2, 0, 0.8, 5.0), sample(2, 3, 0.1, 5.0))
+    fun `per-account series carries forward`() {
+        val samples = listOf(sample(2, 0, 0.8), sample(2, 3, 0.1))
         val p = aggregateWindows(samples, startMs, widthMs, buckets, labels, includeAccounts = true, names = mapOf(2 to "acc2"))
         val acc2 = p.perAccount.single { it.accountId == 2 }
         assertEquals("acc2", acc2.accountName)
         assertSeries(listOf(0.8, 0.8, 0.8, 0.1), acc2.fiveHour, "acc2.fiveHour")
-        assertSeries(listOf(4.0, 4.0, 4.0, 0.5), acc2.fiveHourWeighted, "acc2.fiveHourWeighted")
-    }
-
-    @Test
-    fun `coefficient is frozen per sample - old buckets keep the old coefficient`() {
-        // Same account, coefficient changes 5 -> 20 between b0 and b3 (as if the admin bumped it
-        // and a fresh point was recorded). The old bucket must keep ×5, the new one ×20.
-        val samples = listOf(sample(7, 0, 0.4, 5.0), sample(7, 3, 0.4, 20.0))
-        val p = aggregateWindows(samples, startMs, widthMs, buckets, labels, includeAccounts = true, names = emptyMap())
-        val acc = p.perAccount.single()
-        assertSeries(listOf(2.0, 2.0, 2.0, 8.0), acc.fiveHourWeighted, "frozen coef weighted")
-        // pool total mirrors it (single account)
-        assertSeries(listOf(2.0, 2.0, 2.0, 8.0), p.totalFiveHourWeighted, "frozen coef total")
     }
 
     @Test
     fun `buckets before an account's first sample are null, not zero`() {
         // acct first reports in b2 -> b0/b1 have no contributor at all.
-        val samples = listOf(sample(1, 2, 0.5, 1.0))
+        val samples = listOf(sample(1, 2, 0.5))
         val p = aggregateWindows(samples, startMs, widthMs, buckets, labels, includeAccounts = false, names = emptyMap())
         assertSeries(listOf(null, null, 0.5, 0.5), p.totalFiveHour, "leading nulls")
         assertTrue(p.perAccount.isEmpty(), "perAccount hidden when includeAccounts=false")

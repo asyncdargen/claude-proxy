@@ -21,7 +21,7 @@ class TierOrderTest {
     ) =
         AccountRuntime(
             id = id, name = "a$id", type = AccountType.OAUTH, groupId = null, ownerId = null,
-            priority = priority, threshold = threshold, coefficient = 1.0, enabled = true,
+            priority = priority, threshold = threshold, enabled = true,
             overThreshold = overThreshold, health = AccountHealth.OK, deviceId = null,
             secret = AccountSecret(),
             limit = LimitState(windows = mapOf(WindowKind.FIVE_HOUR to WindowLimit(utilization = usage, status = status))),

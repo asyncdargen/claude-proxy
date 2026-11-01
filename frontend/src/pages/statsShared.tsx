@@ -160,27 +160,9 @@ export function WindowBurnCharts({ data, mode, hint, height = 190 }: {
   const sum = (v: number[]) => v.reduce((a, b) => a + b, 0);
   const legend = items.map((it) => ({ key: it.key, label: it.label, color: it.color }));
 
-  // The ×coef view restates each account's burn in base-subscription windows, so a ×5 Max and a ×1
-  // account can be read on one scale. Offered for the 5-hour chart only: the weekly window is the
-  // same size on every plan, so weighting it would invent capacity that doesn't exist.
-  const [weighted, setWeighted] = useState(false);
-  // Tolerate a frontend that is briefly ahead of the service during a rollout.
-  const hasWeighted = Array.isArray(data.totalFiveHourWeighted);
-  const on = weighted && hasWeighted;
-
   const panels = [
-    {
-      title: '5-hour window burned',
-      total: on ? data.totalFiveHourWeighted : data.totalFiveHour,
-      pick: (a: WindowDailySrc) => (on ? a.fiveHourWeighted : a.fiveHour),
-      scaleToggle: hasWeighted,
-    },
-    {
-      title: 'Weekly window burned',
-      total: data.totalWeekly,
-      pick: (a: WindowDailySrc) => a.weekly,
-      scaleToggle: false,
-    },
+    { title: '5-hour window burned', total: data.totalFiveHour, pick: (a: WindowDailySrc) => a.fiveHour },
+    { title: 'Weekly window burned', total: data.totalWeekly, pick: (a: WindowDailySrc) => a.weekly },
   ];
 
   return (
@@ -189,29 +171,12 @@ export function WindowBurnCharts({ data, mode, hint, height = 190 }: {
         <div className="panel" key={c.title}>
           <div className="chart-card-head">
             <span className="t">{c.title}</span>
-            {c.scaleToggle && (
-              <Segmented<'own' | 'base'>
-                className="sm"
-                value={on ? 'base' : 'own'}
-                onChange={(v) => setWeighted(v === 'base')}
-                options={[
-                  { value: 'own', label: 'Own window' },
-                  { value: 'base', label: '×coef' },
-                ]}
-              />
-            )}
             <span className="v">{fmtWindowPct(sum(c.total))}</span>
           </div>
           <StackedChart days={data.days} series={series(c.pick, c.total)} height={height} fmt={fmtWindowPct} mode={mode} />
           {legend.length > 1 && <Legend items={legend} />}
         </div>
       ))}
-      {on && (
-        <p className="hint" style={{ gridColumn: '1 / -1', margin: 0 }}>
-          5-hour burn is scaled by each account's capacity coefficient: 100% = one <b>base (×1)</b>{' '}
-          subscription window, so a ×5 account spending its whole window reads 500%.
-        </p>
-      )}
       {hint && <p className="hint" style={{ gridColumn: '1 / -1', margin: 0 }}>{hint}</p>}
     </div>
   );

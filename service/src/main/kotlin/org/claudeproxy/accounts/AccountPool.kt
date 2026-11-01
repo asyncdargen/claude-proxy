@@ -138,8 +138,9 @@ class AccountPool {
         now: Instant = Instant.now(),
     ): List<AccountRuntime> {
         val sorted = tier.sortedWith(candidateOrder(strategy, now))
-        val under = sorted.filter { it.usageForSelection() < it.threshold }
-        val over = sorted.filter { it.usageForSelection() >= it.threshold }
+        // API keys have no windows and therefore no threshold: they are always "under".
+        val under = sorted.filter { it.isApiKey || it.usageForSelection() < it.threshold }
+        val over = sorted.filter { !it.isApiKey && it.usageForSelection() >= it.threshold }
         return under + over.filter { it.overThreshold } + over.filter { !it.overThreshold && it.hasHeadroom() }
     }
 
@@ -182,18 +183,20 @@ class AccountPool {
     suspend fun updateLimit(id: Int, newLimit: LimitState) {
         val updated = mutex.withLock {
             val cur = accounts[id] ?: return@withLock null
-            val merged = cur.copy(limit = newLimit.copy(updatedAt = newLimit.updatedAt ?: Instant.now()))
+            // An API key's `anthropic-ratelimit-*` headers are per-minute token/request limits, not
+            // subscription windows — keeping them painted a "5h" bar that rotated a key out over a
+            // momentary burst. Only the 429 cooldown applies to a key.
+            val limit = if (cur.isApiKey) newLimit.copy(windows = emptyMap(), overage = null, grace = null) else newLimit
+            val merged = cur.copy(limit = limit.copy(updatedAt = limit.updatedAt ?: Instant.now()))
             accounts = accounts + (id to merged)
             merged
         } ?: return
         runCatching { AccountRepo.persistLimit(id, updated.limit) }
             .onFailure { log.warn("persist limit failed for {}: {}", id, it.message) }
-        // Append utilization history points for the trend graphs (throttled internally). The
-        // account's current coefficient is frozen into each point so historical ×coef charts are
-        // unaffected when the coefficient later changes.
+        // Append utilization history points for the trend graphs (throttled internally).
         updated.limit.windows.forEach { (kind, w) ->
             w.utilization?.let {
-                org.claudeproxy.repo.WindowSnapshotRepo.record(id,kind,it,updated.coefficient,
+                org.claudeproxy.repo.WindowSnapshotRepo.record(id,kind,it,
                     now=w.updatedAt ?: updated.limit.updatedAt ?: Instant.now(),resetAt=w.resetAt)
             }
         }

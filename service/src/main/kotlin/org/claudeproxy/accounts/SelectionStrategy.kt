@@ -92,12 +92,13 @@ internal fun weeklyResetBucket(account: AccountRuntime, now: Instant): Long {
 
 /**
  * How much of the 5-hour window this account can still serve before it rotates out, weighted by
- * its capacity coefficient — a x5 Max account at 50% has five times the runway of a x1 at 50%.
+ * its plan — a Max account at 50% has five times the runway of a Pro at 50%. A weekly-only (Ultra)
+ * account has no 5-hour reading and counts as fully open, weighted at its 5-hour multiplier.
  * Higher sorts first, so the leading account is the one that can absorb the longest burst.
  */
 internal fun fiveHourHeadroom(account: AccountRuntime): Double {
     val used = account.limit.window(WindowKind.FIVE_HOUR)?.usageFraction() ?: 0.0
-    return (account.threshold - used).coerceAtLeast(0.0) * account.coefficient
+    return (account.threshold - used).coerceAtLeast(0.0) * account.kind.fiveHourWeight
 }
 
 /** The comparator [AccountPool.tierOrder] sorts each of its three partitions with. */

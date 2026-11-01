@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "org.claudeproxy"
-version = "0.1.0"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
@@ -33,6 +33,8 @@ dependencies {
     implementation("io.ktor:ktor-client-core:$ktorVersion")
     implementation("io.ktor:ktor-client-cio:$ktorVersion")
     implementation("io.ktor:ktor-client-apache:$ktorVersion")
+    // per-account outbound proxies: OkHttp is the Ktor engine that speaks both HTTP CONNECT and SOCKS5
+    implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
 
     // Persistence
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
@@ -81,7 +83,7 @@ tasks.test {
 }
 
 // Fat jar for deployment. The UI is no longer baked in — nginx serves the SPA (see
-// deploy/Dockerfile.nginx). This jar is the service only (API + datapath).
+// deploy/Dockerfile.web). This jar is the service only (API + datapath).
 tasks.register<Jar>("fatJar") {
     archiveClassifier.set("all")
     manifest {

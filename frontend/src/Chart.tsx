@@ -184,7 +184,7 @@ export interface Line { name: string; color: string; values: (number | null)[]; 
 
 /** Multi-line chart over evenly-spaced buckets. Values are fractions shown as %; the y-axis is
     0..100% by default but auto-scales past it (nice ceiling) when a series exceeds 1 — e.g. a
-    pool line that sums utilization / coefficient-weighted utilization across accounts. */
+    pool line that sums utilization across accounts. */
 export function LineChart({ labels, lines, height = 170 }: { labels: string[]; lines: Line[]; height?: number }) {
   const [hover, setHover] = useState<number | null>(null);
   const { ref, w } = useMeasuredWidth();

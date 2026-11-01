@@ -39,7 +39,7 @@ class ProbeRecoveryTest {
     }
     private fun account(name: String, owner: Int?, group: Int? = null) = AccountRepo.create(
         name=name, type=AccountType.OAUTH, groupId=group, priority=10, threshold=0.9,
-        coefficient=1.0, secret=AccountSecret(accessToken="upstream-secret",refreshToken="refresh-secret"),
+        kind=org.claudeproxy.model.AccountKind.PRO, secret=AccountSecret(accessToken="upstream-secret",refreshToken="refresh-secret"),
         createdBy=null, ownerId=owner)
     @AfterTest fun cleanup() { MemoryCache.clear(); db.delete() }
     @Test fun `successful probe clears persisted cooldown but failed probe preserves it`() = runBlocking {

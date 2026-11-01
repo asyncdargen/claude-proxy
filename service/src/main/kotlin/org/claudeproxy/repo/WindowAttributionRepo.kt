@@ -17,21 +17,22 @@ object WindowAttributionRepo {
         val start = now.minus(days.toLong(),ChronoUnit.DAYS)
         val lookback = start.minus(7,ChronoUnit.DAYS)
         val accounts = Accounts.select(Accounts.id,Accounts.name)
-            .where { Accounts.ownerId.isNull() }.orderBy(Accounts.id).toList()
+            // API keys have no subscription window to attribute
+            .where { Accounts.ownerId.isNull() and (Accounts.type neq org.claudeproxy.model.AccountType.API_KEY.name) }.orderBy(Accounts.id).toList()
         val ids = accounts.map { it[Accounts.id] }
         if (ids.isEmpty()) return@transaction WindowAttributionResponse(now.toString(),emptyList())
         val limits = AccountLimits.selectAll().where { AccountLimits.accountId inList ids }.toList()
         val snapshots = WindowSnapshots.selectAll().where {
             (WindowSnapshots.accountId inList ids) and (WindowSnapshots.ts greaterEq lookback) and (WindowSnapshots.ts lessEq now)
         }.map { WindowSample(it[WindowSnapshots.accountId],it[WindowSnapshots.windowKind],it[WindowSnapshots.ts],
-            it[WindowSnapshots.utilization],it[WindowSnapshots.coefficient] ?: 1.0,it[WindowSnapshots.resetAt]) }.toMutableList()
+            it[WindowSnapshots.utilization],it[WindowSnapshots.resetAt]) }.toMutableList()
         limits.forEach { row ->
             val ts = row[AccountLimits.updatedAt]
             // Only reported utilization, like snapshots: remaining/limit on API keys is a per-minute rate limit.
             val util = row[AccountLimits.utilization]
             // Unknown observation time is not "now"; an unavailable quota is not zero usage.
             if (ts != null && ts >= lookback && ts <= now && util != null) {
-                snapshots += WindowSample(row[AccountLimits.accountId],row[AccountLimits.windowKind],ts,util,1.0,row[AccountLimits.resetAt])
+                snapshots += WindowSample(row[AccountLimits.accountId],row[AccountLimits.windowKind],ts,util,row[AccountLimits.resetAt])
             }
         }
         val byWindow = snapshots.groupBy { it.accountId to it.kind }.mapValues { (_,points) ->

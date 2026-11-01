@@ -223,18 +223,19 @@ object ModelCatalog {
     private suspend fun fetch(pool: AccountPool, upstreamBaseUrl: String): List<Listed> {
         // Any healthy account will do — listing consumes no subscription quota. Global accounts
         // first: a personal account should not be what the whole proxy's catalogue depends on.
+        // An API key pointed at some other upstream lists *that* upstream's models — not Anthropic's.
         val account = (pool.snapshotGlobal() + pool.snapshot()).firstOrNull {
-            it.enabled && it.health == AccountHealth.OK
+            it.enabled && it.health == AccountHealth.OK && it.upstreamBaseUrl == null
         } ?: return emptyList()
         val out = mutableListOf<Listed>()
         var after: String? = null
         // Paged by after_id; a handful of pages is far more than Anthropic lists.
         repeat(5) {
-            val page = Http.client.prepareGet(
+            val page = Http.clientFor(account).prepareGet(
                 "$upstreamBaseUrl/v1/models?limit=1000" + (after?.let { "&after_id=$it" } ?: ""),
             ) {
                 header("anthropic-version", "2023-06-01")
-                UpstreamAuth.apply(this, account.type, account.secret)
+                UpstreamAuth.apply(this, account)
             }.execute { response ->
                 check(response.status.value in 200..299) { "HTTP ${response.status.value} from /v1/models" }
                 json.parseToJsonElement(response.readRawBytes().decodeToString()) as? JsonObject

@@ -135,15 +135,33 @@ export interface GraceDto {
   weeklyUtilization: number | null;
 }
 
+export type AccountKind = 'NONE' | 'PRO' | 'MAX' | 'ULTRA';
+export type ApiKeyMode = 'ANTHROPIC_API' | 'AGENT_SDK' | 'CLAUDE_CODE';
+export type ApiAuthStyle = 'X_API_KEY' | 'BEARER';
+export type ProxyType = 'NONE' | 'HTTP' | 'SOCKS5';
+
+/** Outbound proxy of an account. The password never comes back — only whether one is stored. */
+export interface AccountProxyDto {
+  type: ProxyType;
+  host: string;
+  port: number;
+  username: string | null;
+  hasPassword: boolean;
+}
+
 export interface AccountDto {
   id: number;
   name: string;
   type: string;
+  apiKeyMode: ApiKeyMode;
+  // API keys only: custom Anthropic-compatible upstream (null = api.anthropic.com) + how the key is sent
+  baseUrl?: string | null;
+  apiAuthStyle?: ApiAuthStyle;
   groupId: number | null;
   ownerId: number | null;
   priority: number;
   threshold: number;
-  coefficient: number;
+  kind: AccountKind;
   enabled: boolean;
   overThreshold: boolean;
   health: string;
@@ -154,6 +172,9 @@ export interface AccountDto {
   usageFraction: number | null;
   rateLimitedUntil: string | null;
   effectiveRemaining: number | null;
+  // false = upstream reports no 5-hour window (a verified Ultra plan)
+  fiveHourLimited?: boolean;
+  proxy?: AccountProxyDto | null;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
@@ -641,15 +662,11 @@ export interface DailyStats {
 export interface WindowSeries {
   accountId: number; accountName: string | null;
   fiveHour: (number | null)[]; weekly: (number | null)[];
-  // coefficient × utilization (may exceed 1) — the ×coef toggle switches to these
-  fiveHourWeighted: (number | null)[]; weeklyWeighted: (number | null)[];
 }
 export interface WindowStats {
   buckets: string[];
   totalFiveHour: (number | null)[];          // Σ raw utilization across accounts (may exceed 1)
   totalWeekly: (number | null)[];
-  totalFiveHourWeighted: (number | null)[];  // Σ coefficient × utilization across accounts
-  totalWeeklyWeighted: (number | null)[];
   perAccount: WindowSeries[];
   canViewAccounts: boolean;
 }
@@ -658,14 +675,11 @@ export interface WindowDailySeries {
   accountId: number; accountName: string | null;
   // window-fractions burned that day: 1.0 = one whole window. Several resets in a day stack past 1.
   fiveHour: number[]; weekly: number[];
-  // the 5h burn restated in base-subscription windows (each step ×the account's coefficient)
-  fiveHourWeighted: number[];
 }
 export interface WindowDaily {
   days: string[];
   totalFiveHour: number[];
   totalWeekly: number[];
-  totalFiveHourWeighted: number[];
   perAccount: WindowDailySeries[];
   canViewAccounts: boolean;
 }

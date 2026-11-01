@@ -12,12 +12,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"claudeproxy/gateway/internal/anthropic"
+	"claudeproxy/gateway/internal/apiprofile"
 	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/config"
 	"claudeproxy/gateway/internal/control"
@@ -78,24 +80,17 @@ type Translator interface {
 
 // Handler is the routing datapath HTTP handler.
 type Handler struct {
-	cfg      *config.Config
-	ctrl     *control.Client
-	tr       Translator
-	upstream *http.Client
+	cfg  *config.Config
+	ctrl *control.Client
+	tr   Translator
+	// upstreams picks the upstream client per candidate (its own proxy, else the global one).
+	upstreams *egress.Pool
 }
 
-// NewHandler builds a routing handler. The upstream client has NO overall timeout (SSE streams
-// run for minutes) but bounds dial + TLS handshake so a dead upstream fails fast.
+// NewHandler builds a routing handler. Upstream clients have NO overall timeout (SSE streams
+// run for minutes) but bound dial + TLS handshake so a dead upstream fails fast.
 func NewHandler(cfg *config.Config, ctrl *control.Client, tr Translator) *Handler {
-	return &Handler{
-		cfg:  cfg,
-		ctrl: ctrl,
-		tr:   tr,
-		upstream: &http.Client{
-			Transport:     egress.AnthropicTransport(cfg.AnthropicProxyURL),
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-	}
+	return &Handler{cfg: cfg, ctrl: ctrl, tr: tr, upstreams: egress.NewPool(cfg.AnthropicProxyURL)}
 }
 
 // retryableStatuses make a non-last attempt retry the next account instead of passing through.
@@ -206,37 +201,68 @@ func (h *Handler) forward(
 		body = ccident.StampUserID(body, cand.DeviceID, cand.AccountUUID, sessionID)
 	}
 
-	url := h.cfg.UpstreamBaseURL + prep.UpstreamPath
+	// Headers are assembled first: the API-key profile below may rewrite the body, and the
+	// request is built from whatever body comes out of it.
+	headers := http.Header{}
+	ccident.SetClientHeaders(headers, ccident.UserAgent(h.cfg.ClaudeCodeUserAgent), sessionID)
+	// Per-account upstream credentials (already decrypted by the service). Merge anthropic-beta
+	// with any client-provided values so client betas (e.g. context-management, prompt-caching)
+	// survive alongside the account's oauth beta.
+	for k, v := range cand.AuthHeaders {
+		if strings.EqualFold(k, "anthropic-beta") {
+			headers.Set("anthropic-beta", mergeBeta(prep.Beta, v))
+		} else {
+			headers.Set(k, v)
+		}
+	}
+	if headers.Get("anthropic-beta") == "" && len(prep.Beta) > 0 {
+		headers.Set("anthropic-beta", strings.Join(dedupCSV(prep.Beta), ","))
+	}
+	headers.Set("anthropic-version", "2023-06-01")
+	// Everything above presents a Claude Code CLI, which is what a subscription needs. An API key
+	// configured as a plain API or Agent SDK key gets that identity taken back off (or swapped).
+	body = apiprofile.Apply(headers, body, cand.Type, cand.APIKeyMode, prep.UpstreamPath)
+
+	// attemptFailed ends an attempt that never reached upstream: the next account takes over, or,
+	// on the last one, the client gets a 502 in whatever form the response still allows.
+	attemptFailed := func() forwardResult {
+		if canRetry {
+			report.Status = 0
+			return forwardResult{retry: true, headSent: headSent, report: report}
+		}
+		h.failAfterHead(w, headSent, http.StatusBadGateway, "api_error", "upstream request failed")
+		report.Status = http.StatusBadGateway
+		return forwardResult{retry: false, headSent: headSent, report: report}
+	}
+
+	url, err := cand.UpstreamURL(h.cfg.UpstreamBaseURL, prep.UpstreamPath)
+	if err != nil {
+		log.Printf("routing: account %d: %v; attempt failed", cand.AccountID, err)
+		return attemptFailed()
+	}
 	var reqBody io.Reader
 	if len(body) > 0 {
 		reqBody = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, prep.Method, url, reqBody)
 	if err != nil {
-		report.Status = 0
-		return forwardResult{retry: canRetry, report: report}
+		return attemptFailed()
 	}
+	req.Header = headers
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 		req.ContentLength = int64(len(body))
 	}
-	ccident.SetClientHeaders(req.Header, ccident.UserAgent(h.cfg.ClaudeCodeUserAgent), sessionID)
-	// Per-account upstream credentials (already decrypted by the service). Merge anthropic-beta
-	// with any client-provided values so client betas (e.g. context-management, prompt-caching)
-	// survive alongside the account's oauth beta.
-	for k, v := range cand.AuthHeaders {
-		if strings.EqualFold(k, "anthropic-beta") {
-			req.Header.Set("anthropic-beta", mergeBeta(prep.Beta, v))
-		} else {
-			req.Header.Set(k, v)
-		}
-	}
-	if req.Header.Get("anthropic-beta") == "" && len(prep.Beta) > 0 {
-		req.Header.Set("anthropic-beta", strings.Join(dedupCSV(prep.Beta), ","))
-	}
-	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := h.upstream.Do(req)
+	// The account's own outbound proxy, else the gateway-wide route. A proxy URL that does not
+	// validate fails this attempt like a dead upstream would — never a quiet direct connection.
+	client, err := h.upstreams.Client(cand.ProxyURL)
+	if err != nil {
+		log.Printf("routing: account %d: unusable outbound proxy (%v); attempt failed", cand.AccountID, err)
+		return attemptFailed()
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		if canRetry {
 			report.Status = 0

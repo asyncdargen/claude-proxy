@@ -190,10 +190,26 @@ object Accounts : Table("accounts") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 128)
     val type = varchar("type", 32)
+    val apiKeyMode = varchar("api_key_mode", 32).default("CLAUDE_CODE")
+    // API keys only: an Anthropic-compatible upstream other than api.anthropic.com (another
+    // Claude Code proxy, a corporate gateway…) and whether the key goes out as x-api-key or bearer.
+    val baseUrl = varchar("base_url", 512).nullable()
+    val apiAuthStyle = varchar("api_auth_style", 16).default("X_API_KEY")
     val groupId = integer("group_id").references(AccountGroups.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.SET_NULL).nullable()
     val priority = integer("priority").default(100)
     val threshold = double("threshold").default(0.9)
+    // Legacy ×1/×5/×20 capacity coefficient, superseded by `kind`. Kept only so the one-time
+    // `migrated:account_kind` backfill can read it; nothing else uses it any more.
     val coefficient = double("coefficient").default(1.0)
+    // subscription plan (AccountKind): NONE | PRO | MAX | ULTRA — weights pool headroom only
+    val kind = varchar("kind", 16).default("NONE")
+    // optional outbound proxy for every upstream call made for this account (datapath, chat,
+    // probe, token refresh). The password is AES-GCM encrypted like the account secret.
+    val proxyType = varchar("proxy_type", 16).default("NONE")
+    val proxyHost = varchar("proxy_host", 255).nullable()
+    val proxyPort = integer("proxy_port").nullable()
+    val proxyUsername = varchar("proxy_username", 255).nullable()
+    val proxyPasswordCipher = text("proxy_password_cipher").nullable()
     val enabled = bool("enabled").default(true)
     // opt-in fallback: when every account is over its threshold, only accounts with this flag
     // stay usable past their threshold; others drop out of selection until their window resets.
@@ -291,12 +307,6 @@ object WindowSnapshots : Table("window_snapshots") {
     val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
     val windowKind = varchar("window_kind", 8)   // "5h" | "7d"
     val utilization = double("utilization")
-    // coefficient in effect when this point was recorded, FROZEN at write time so the
-    // ×coef-weighted charts keep their historical weighting even after an account's coefficient
-    // later changes. Nullable only for pre-migration rows; backfilled once from the account's
-    // current coefficient at startup (see Db.migrateWindowSnapshotCoefficient), and always
-    // written for new rows.
-    val coefficient = double("coefficient").nullable()
     // Actual observed reset only; legacy rows intentionally stay NULL.
     val resetAt = timestamp("reset_at").nullable()
     val ts = timestamp("ts")

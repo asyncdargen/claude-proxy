@@ -38,6 +38,59 @@ enum class AccountType {
     }
 }
 
+/** Request profile for API-key credentials. Billing scope itself is determined by the key/workspace. */
+enum class ApiKeyMode {
+    ANTHROPIC_API, AGENT_SDK, CLAUDE_CODE;
+
+    companion object {
+        fun fromString(s: String?): ApiKeyMode? = entries.firstOrNull { it.name.equals(s, ignoreCase = true) }
+    }
+}
+
+/**
+ * Subscription plan of an account. Since 2026-10-30 Anthropic sells Pro, **Max** (the former
+ * "Max 5x") and **Ultra** (the former "Max 20x"); a verified Ultra account has no 5-hour window at
+ * all, only the weekly one. The weights exist only to read pool headroom — how many Pro-sized
+ * windows an account is worth — and never steer selection on their own: the 5-hour multiplier
+ * is the plan's session allowance, the weekly one its quota (Ultra's weekly is 10× Pro, not 20×).
+ * [NONE] is "not a subscription / unknown", weighted like Pro so it still counts once.
+ */
+enum class AccountKind(val fiveHourWeight: Double, val weeklyWeight: Double) {
+    NONE(1.0, 1.0),
+    PRO(1.0, 1.0),
+    MAX(5.0, 5.0),
+    ULTRA(20.0, 10.0);
+
+    companion object {
+        fun fromString(s: String?): AccountKind? = entries.firstOrNull { it.name.equals(s?.trim(), ignoreCase = true) }
+
+        /** What a legacy capacity coefficient (×1 / ×5 / ×20) meant, for the one-time migration. */
+        fun fromLegacyCoefficient(coefficient: Double): AccountKind = when {
+            coefficient >= 15.0 -> ULTRA
+            coefficient >= 3.0 -> MAX
+            else -> PRO
+        }
+    }
+}
+
+/** Outbound proxy an account's upstream traffic goes through. SOCKS5 resolves names on the proxy. */
+enum class ProxyType {
+    NONE, HTTP, SOCKS5;
+
+    companion object {
+        fun fromString(s: String?): ProxyType? = entries.firstOrNull { it.name.equals(s?.trim(), ignoreCase = true) }
+    }
+}
+
+/** How an API key is presented upstream: Anthropic's `x-api-key`, or a bearer token for gateways that want one. */
+enum class ApiAuthStyle {
+    X_API_KEY, BEARER;
+
+    companion object {
+        fun fromString(s: String?): ApiAuthStyle? = entries.firstOrNull { it.name.equals(s?.trim(), ignoreCase = true) }
+    }
+}
+
 enum class AccountHealth { OK, REFRESH_FAILED, DEAD }
 
 enum class LimitStatus { ALLOWED, ALLOWED_WARNING, REJECTED, UNKNOWN }
@@ -133,12 +186,17 @@ data class AccountDto(
     val id: Int,
     val name: String,
     val type: String,
+    val apiKeyMode: String = "CLAUDE_CODE",
+    // API keys only: a custom Anthropic-compatible upstream (null = api.anthropic.com) and how the
+    // key is presented to it
+    val baseUrl: String? = null,
+    val apiAuthStyle: String = "X_API_KEY",
     val groupId: Int?,
     // null = global (shared pool); otherwise the owning user's id (personal account)
     val ownerId: Int? = null,
     val priority: Int,
     val threshold: Double,
-    val coefficient: Double,
+    val kind: String = "NONE",
     val enabled: Boolean,
     // opt-in fallback: keep using this account past its threshold when all accounts are saturated
     val overThreshold: Boolean = false,
@@ -152,7 +210,11 @@ data class AccountDto(
     // usage fraction driving selection (max across windows), 0..1
     val usageFraction: Double?,
     val rateLimitedUntil: String?,
-    val effectiveRemaining: Double?, // coefficient-weighted remaining capacity
+    val effectiveRemaining: Double?, // kind-weighted remaining capacity (null for API keys)
+    // false = upstream reports no 5-hour window for this account (a verified Ultra plan)
+    val fiveHourLimited: Boolean = true,
+    // outbound proxy, password never included (null = direct / the deployment-wide proxy)
+    val proxy: AccountProxyDto? = null,
     // cumulative counters for this account (all-time)
     val totalInputTokens: Long,
     val totalOutputTokens: Long,
@@ -163,6 +225,15 @@ data class AccountDto(
     val deviceId: String?,
     val accountUuid: String? = null,
     val createdAt: String,
+)
+
+@Serializable
+data class AccountProxyDto(
+    val type: String,
+    val host: String,
+    val port: Int,
+    val username: String? = null,
+    val hasPassword: Boolean = false,
 )
 
 @Serializable
@@ -187,8 +258,8 @@ data class PoolStatsDto(
     val totalAccounts: Int,
     val healthyAccounts: Int,
     val activeAccountId: Int?,
-    val totalEffectiveRemaining: Double,   // Σ coefficient-weighted remaining (5-hour)
-    val totalEffectiveCapacity: Double,    // Σ coefficient
+    val totalEffectiveRemaining: Double,   // Σ kind-weighted remaining (5-hour), subscriptions only
+    val totalEffectiveCapacity: Double,    // Σ kind weight
     // same, for the weekly window — drives the "Pool headroom" card subtitle
     val totalWeeklyRemaining: Double,
     val totalWeeklyCapacity: Double,

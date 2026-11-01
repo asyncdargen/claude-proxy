@@ -42,41 +42,7 @@ func TestHTTPSConnectUsesProxyAndKeepsProxyAuthOutsideTLS(t *testing.T) {
 	}))
 	defer origin.Close()
 	originURL, _ := url.Parse(origin.URL)
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxyCalls.Add(1)
-		if r.Method != "CONNECT" || r.Host != originURL.Host {
-			t.Error("unexpected CONNECT target")
-			w.WriteHeader(400)
-			return
-		}
-		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxy-user:proxy-pass"))
-		if r.Header.Get("Proxy-Authorization") != want || r.Header.Get("Authorization") != "" {
-			t.Error("CONNECT auth invalid")
-			w.WriteHeader(407)
-			return
-		}
-		up, err := net.DialTimeout("tcp", r.Host, time.Second)
-		if err != nil {
-			t.Error(err)
-			w.WriteHeader(502)
-			return
-		}
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			up.Close()
-			t.Error(err)
-			return
-		}
-		defer conn.Close()
-		defer up.Close()
-		buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
-		buf.Flush()
-		done := make(chan struct{})
-		go func() { io.Copy(up, buf); up.Close(); close(done) }()
-		io.Copy(conn, up)
-		conn.Close()
-		<-done
-	}))
+	proxy := connectProxy(t, originURL.Host, "proxy-user:proxy-pass", &proxyCalls)
 	defer proxy.Close()
 	proxyURL, _ := url.Parse(proxy.URL)
 	proxyURL.User = url.UserPassword("proxy-user", "proxy-pass")
@@ -146,4 +112,45 @@ func TestNoProxySettingPreservesDirectRouteDespiteGlobalEnvironment(t *testing.T
 	if resp.StatusCode != 200 {
 		t.Fatal("existing direct route failed")
 	}
+}
+
+// connectProxy is a minimal HTTP CONNECT proxy that only tunnels to [target] and demands Basic
+// [userPass] in Proxy-Authorization; it counts the CONNECTs it accepted.
+func connectProxy(t *testing.T, target, userPass string, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != "CONNECT" || r.Host != target {
+			t.Error("unexpected CONNECT target")
+			w.WriteHeader(400)
+			return
+		}
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte(userPass))
+		if r.Header.Get("Proxy-Authorization") != want || r.Header.Get("Authorization") != "" {
+			t.Error("CONNECT auth invalid")
+			w.WriteHeader(407)
+			return
+		}
+		up, err := net.DialTimeout("tcp", r.Host, time.Second)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(502)
+			return
+		}
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			up.Close()
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		defer up.Close()
+		buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		buf.Flush()
+		done := make(chan struct{})
+		go func() { io.Copy(up, buf); up.Close(); close(done) }()
+		io.Copy(conn, up)
+		conn.Close()
+		<-done
+	}))
 }

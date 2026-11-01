@@ -6,7 +6,7 @@ import kotlin.test.*
 
 class WindowAttributionTest {
     private val t = Instant.parse("2026-10-15T00:00:00Z")
-    private fun sample(seconds: Long, util: Double, reset: Instant? = null) = WindowSample(1,"5h",t.plusSeconds(seconds),util,1.0,reset)
+    private fun sample(seconds: Long, util: Double, reset: Instant? = null) = WindowSample(1,"5h",t.plusSeconds(seconds),util,reset)
     private fun event(seconds: Long, user: Int?, cost: Double, known: Boolean = true, tokens: Long = 10) = AttributionUsage(1,user,t.plusSeconds(seconds),cost,known,tokens)
     private fun periods(samples: List<WindowSample>, events: List<AttributionUsage> = emptyList(), liveReset: Instant? = t.plusSeconds(18000), now: Instant = t.plusSeconds(600)) =
         attributeWindow(1,"5h",samples,events,mapOf(1 to "alice",2 to "bob"),liveReset,now)

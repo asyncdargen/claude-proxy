@@ -59,7 +59,7 @@ class InternalRoutesTest {
         seededToken = ProxyTokenRepo.create(adminId, "test").token!!
         AccountRepo.create(
             name = "acc1", type = AccountType.OAUTH, groupId = null, priority = 10,
-            threshold = 0.8, coefficient = 1.0,
+            threshold = 0.8, kind = org.claudeproxy.model.AccountKind.PRO,
             secret = AccountSecret(accessToken = "sk-ant-oat-TESTTOKEN", refreshToken = "r"),
             createdBy = adminId,
         )

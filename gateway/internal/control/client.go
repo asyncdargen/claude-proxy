@@ -8,22 +8,52 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
 // Candidate is one ordered try-list entry with decrypted upstream auth headers.
 type Candidate struct {
-	AccountID          int               `json:"accountId"`
-	Type               string            `json:"type"`
-	DeviceID           string            `json:"deviceId"`
-	AccountUUID        string            `json:"accountUuid"` // subscription's account uuid for metadata.user_id; "" for API keys / not yet known
-	AuthHeaders        map[string]string `json:"authHeaders"`
-	FiveHourResetEpoch int64             `json:"fiveHourResetEpoch"`
-	WeeklyResetEpoch   int64             `json:"weeklyResetEpoch"`
+	AccountID   int               `json:"accountId"`
+	Type        string            `json:"type"`
+	APIKeyMode  string            `json:"apiKeyMode"` // API_KEY accounts: ANTHROPIC_API | AGENT_SDK | CLAUDE_CODE ("" = CLAUDE_CODE)
+	DeviceID    string            `json:"deviceId"`
+	AccountUUID string            `json:"accountUuid"` // subscription's account uuid for metadata.user_id; "" for API keys / not yet known
+	AuthHeaders map[string]string `json:"authHeaders"`
+	// ProxyURL is the account's own outbound proxy, credentials included and already decrypted
+	// (http, https, socks5, socks5h). Empty = the gateway-wide ANTHROPIC_PROXY_URL, or direct.
+	// Never log it: use egress.RedactProxy.
+	ProxyURL string `json:"proxyUrl"`
+	// BaseURL is an API_KEY account's own upstream (another Anthropic-compatible proxy, say),
+	// path prefix included. Empty = the gateway's UPSTREAM_BASE_URL.
+	BaseURL            string `json:"baseUrl"`
+	FiveHourResetEpoch int64  `json:"fiveHourResetEpoch"`
+	WeeklyResetEpoch   int64  `json:"weeklyResetEpoch"`
+}
+
+// errInvalidBaseURL deliberately leaves the URL out: an operator may have put a secret in it.
+var errInvalidBaseURL = errors.New("account base URL is not an absolute http(s) URL without credentials, query or fragment")
+
+// UpstreamURL is where this candidate's attempt goes: [pathAndQuery] (e.g. "/v1/messages?beta=true")
+// appended to the account's own base URL, or to [defaultBase] when it has none. The service
+// validates the base already; this is the defensive re-check, so a bad value fails the attempt
+// instead of sending account credentials somewhere unintended.
+func (c Candidate) UpstreamURL(defaultBase, pathAndQuery string) (string, error) {
+	if c.BaseURL == "" {
+		return defaultBase + pathAndQuery, nil
+	}
+	u, err := url.Parse(c.BaseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Opaque != "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errInvalidBaseURL
+	}
+	return strings.TrimRight(c.BaseURL, "/") + pathAndQuery, nil
 }
 
 // ResolveResp is the /internal/resolve response.
@@ -52,13 +82,13 @@ type ResolveResp struct {
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.
 type UsageReport struct {
-	AccountID  int    `json:"accountId"`
-	UserID     *int   `json:"userId"`
-	TokenID    *int   `json:"tokenId,omitempty"`
-	Input      int64  `json:"input"`
-	Output     int64  `json:"output"`
-	CacheRead  int64  `json:"cacheRead"`
-	CacheWrite int64  `json:"cacheWrite"`
+	AccountID  int   `json:"accountId"`
+	UserID     *int  `json:"userId"`
+	TokenID    *int  `json:"tokenId,omitempty"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
 	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite, priced at 2× input instead of 1.25×.
 	CacheWrite1h int64 `json:"cacheWrite1h,omitempty"`
 	// Server-side tool calls Anthropic bills per invocation (web search) — token counts alone

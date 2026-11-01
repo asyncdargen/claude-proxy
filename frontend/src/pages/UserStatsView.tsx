@@ -46,8 +46,6 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
   const [days, setDays] = useState(7);
   const [endDate, setEndDate] = useState(todayLocal());
   const [mode, setMode] = useChartMode();
-  // window-utilization display: raw API utilization vs coefficient-weighted (both summed across accounts)
-  const [winMode, setWinMode] = useState<'api' | 'coef'>('api');
   const [modelFilter, setModelFilter] = useState('');
   const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
   const [selAcct, setSelAcct] = useState<number | null>(null);
@@ -187,14 +185,11 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
                   <span className="t">Window utilization</span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span className="hint">personal accounts{days > 30 ? ' · 30d max' : ''}</span>
-                    <Segmented<'api' | 'coef'> value={winMode} onChange={setWinMode} options={[
-                      { value: 'api', label: 'API' }, { value: 'coef', label: '×coef' },
-                    ]} />
                   </span>
                 </div>
                 <LineChart labels={windows.buckets} height={190} lines={[
-                  { name: '5-hour', color: W5H, values: winMode === 'coef' ? windows.totalFiveHourWeighted : windows.totalFiveHour },
-                  { name: 'weekly', color: WWK, values: winMode === 'coef' ? windows.totalWeeklyWeighted : windows.totalWeekly },
+                  { name: '5-hour', color: W5H, values: windows.totalFiveHour },
+                  { name: 'weekly', color: WWK, values: windows.totalWeekly },
                 ]} />
                 <Legend items={[{ key: '5h', label: '5-hour', color: W5H }, { key: 'wk', label: 'Weekly', color: WWK }]} />
               </div>
@@ -249,14 +244,11 @@ export function UserStatsView({ userId, canReset, onResetDone }: {
                     <span className="t">Window utilization</span>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       {days > 30 && <span className="hint">30d max</span>}
-                      <Segmented<'api' | 'coef'> value={winMode} onChange={setWinMode} options={[
-                        { value: 'api', label: 'API' }, { value: 'coef', label: '×coef' },
-                      ]} />
                     </span>
                   </div>
                   <LineChart labels={wBuckets} height={175} lines={[
-                    { name: '5-hour', color: W5H, values: (winMode === 'coef' ? acctWin?.fiveHourWeighted : acctWin?.fiveHour) ?? wNulls },
-                    { name: 'weekly', color: WWK, values: (winMode === 'coef' ? acctWin?.weeklyWeighted : acctWin?.weekly) ?? wNulls },
+                    { name: '5-hour', color: W5H, values: acctWin?.fiveHour ?? wNulls },
+                    { name: 'weekly', color: WWK, values: acctWin?.weekly ?? wNulls },
                   ]} />
                   <Legend items={[{ key: '5h', label: '5-hour', color: W5H }, { key: 'wk', label: 'Weekly', color: WWK }]} />
                 </div>

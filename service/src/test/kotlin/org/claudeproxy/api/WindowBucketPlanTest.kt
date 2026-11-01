@@ -68,7 +68,7 @@ class WindowBucketPlanTest {
         val liveTs = Instant.ofEpochMilli(plan.end.toEpochMilli() + (plan.widthMs / 2).toLong())
         val total = plan.buckets + 1
         val payload = aggregateWindows(
-            samples = listOf(org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.42, 1.0)),
+            samples = listOf(org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.42)),
             startMs = plan.start.toEpochMilli(), widthMs = plan.widthMs, buckets = total,
             labels = (0 until total).map { "b$it" }, includeAccounts = false, names = emptyMap(),
         )
@@ -93,10 +93,10 @@ class WindowBucketPlanTest {
         val labels = (0 until total).map { "b$it" }
         // A genuine reading inside the last real bucket.
         val real = org.claudeproxy.repo.WindowSample(
-            1, "5h", Instant.ofEpochMilli((2 * widthMs).toLong() + 100), 0.2, 1.0,
+            1, "5h", Instant.ofEpochMilli((2 * widthMs).toLong() + 100), 0.2,
         )
         fun runWith(liveTs: Instant) = aggregateWindows(
-            samples = listOf(real, org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.9, 1.0)),
+            samples = listOf(real, org.claudeproxy.repo.WindowSample(1, "5h", liveTs, 0.9)),
             startMs = 0L, widthMs = widthMs, buckets = total,
             labels = labels, includeAccounts = false, names = emptyMap(),
         ).totalFiveHour

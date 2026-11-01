@@ -24,6 +24,76 @@ object Http {
     /** Called before starting any network tasks. Config.load validates the URL first. */
     fun configure(proxy: AnthropicProxy?) { configuredProxy = proxy }
 
+    private val perProxy = java.util.concurrent.ConcurrentHashMap<org.claudeproxy.accounts.AccountProxy, HttpClient>()
+
+    /**
+     * The client for an account's upstream calls: its own proxy when it has one, otherwise the
+     * shared [client] (direct or the deployment-wide `ANTHROPIC_PROXY_URL`). Clients are cached per
+     * proxy config — an edit yields a new key, and the old client is simply no longer picked.
+     */
+    fun clientFor(proxy: org.claudeproxy.accounts.AccountProxy?): HttpClient =
+        if (proxy == null) client else perProxy.computeIfAbsent(proxy) { createAccountProxyClient(it) }
+
+    fun clientFor(account: org.claudeproxy.accounts.AccountRuntime): HttpClient = clientFor(account.proxy)
+
+    /**
+     * OkHttp because it is the one Ktor engine with both HTTP CONNECT and SOCKS5. HTTP proxy
+     * credentials go only into the CONNECT (proxyAuthenticator answers the 407), never to the
+     * origin. SOCKS5 credentials are handed to the JDK socket through [SocksCredentials]; the
+     * target hostname travels unresolved, so DNS happens on the proxy side.
+     */
+    internal fun createAccountProxyClient(p: org.claudeproxy.accounts.AccountProxy): HttpClient = HttpClient(io.ktor.client.engine.okhttp.OkHttp) {
+        upstreamSettings()
+        engine {
+            config {
+                val addr = java.net.InetSocketAddress.createUnresolved(p.host, p.port)
+                when (p.type) {
+                    org.claudeproxy.model.ProxyType.SOCKS5 -> {
+                        SocksCredentials.register(p)
+                        proxy(java.net.Proxy(java.net.Proxy.Type.SOCKS, addr))
+                    }
+                    else -> {
+                        proxy(java.net.Proxy(java.net.Proxy.Type.HTTP, addr))
+                        if (!p.username.isNullOrEmpty()) {
+                            val credential = okhttp3.Credentials.basic(p.username, p.password.orEmpty())
+                            proxyAuthenticator { _, response ->
+                                // one attempt: a second 407 means the credentials are wrong
+                                if (response.request.header("Proxy-Authorization") != null) null
+                                else response.request.newBuilder().header("Proxy-Authorization", credential).build()
+                            }
+                        }
+                    }
+                }
+                retryOnConnectionFailure(false)
+                connectionPool(okhttp3.ConnectionPool(50, 5, java.util.concurrent.TimeUnit.MINUTES))
+                dispatcher(okhttp3.Dispatcher().apply { maxRequests = 1000; maxRequestsPerHost = 1000 })
+            }
+        }
+    }
+
+    /**
+     * The JDK's SOCKS client asks the process-wide [java.net.Authenticator] for credentials, keyed
+     * by the proxy's host and port. This one answers only SOCKS requests for proxies an account
+     * registered, so it cannot leak a password to any other prompt.
+     */
+    internal object SocksCredentials : java.net.Authenticator() {
+        private val byEndpoint = java.util.concurrent.ConcurrentHashMap<String, java.net.PasswordAuthentication>()
+        @Volatile private var installed = false
+
+        fun register(p: org.claudeproxy.accounts.AccountProxy) {
+            val user = p.username?.takeIf { it.isNotEmpty() } ?: return
+            byEndpoint["${p.host.lowercase()}:${p.port}"] = java.net.PasswordAuthentication(user, p.password.orEmpty().toCharArray())
+            if (!installed) synchronized(this) {
+                if (!installed) { setDefault(this); installed = true }
+            }
+        }
+
+        override fun getPasswordAuthentication(): java.net.PasswordAuthentication? {
+            if (requestingProtocol?.startsWith("SOCKS", ignoreCase = true) != true) return null
+            return byEndpoint["${requestingHost?.lowercase()}:$requestingPort"]
+        }
+    }
+
     internal fun createClient(proxy: AnthropicProxy?, testSslContext: javax.net.ssl.SSLContext? = null): HttpClient = if (proxy == null) {
         HttpClient(CIO) {
             upstreamSettings()

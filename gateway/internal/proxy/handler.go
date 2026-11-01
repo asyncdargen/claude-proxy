@@ -17,22 +17,16 @@ import (
 // Handler is the datapath HTTP handler. It resolves each request against the service control
 // API, then forwards to Anthropic across the ordered candidates with transparent retry.
 type Handler struct {
-	cfg      *config.Config
-	ctrl     *control.Client
-	upstream *http.Client
+	cfg  *config.Config
+	ctrl *control.Client
+	// upstreams picks the upstream client per candidate (its own proxy, else the global one).
+	upstreams *egress.Pool
 }
 
-// NewHandler builds the datapath handler. The upstream client has NO overall timeout (SSE
-// streams can run for minutes) but bounds dial + TLS handshake so a dead upstream fails fast.
+// NewHandler builds the datapath handler. Upstream clients have NO overall timeout (SSE
+// streams can run for minutes) but bound dial + TLS handshake so a dead upstream fails fast.
 func NewHandler(cfg *config.Config, ctrl *control.Client) *Handler {
-	return &Handler{
-		cfg:  cfg,
-		ctrl: ctrl,
-		upstream: &http.Client{
-			Transport:     egress.AnthropicTransport(cfg.AnthropicProxyURL),
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-	}
+	return &Handler{cfg: cfg, ctrl: ctrl, upstreams: egress.NewPool(cfg.AnthropicProxyURL)}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

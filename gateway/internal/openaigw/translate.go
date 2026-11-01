@@ -306,9 +306,9 @@ func toolUseBlock(tc toolCall) json.RawMessage {
 
 func toolResultBlock(toolUseID, content string) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
-		"type":         "tool_result",
-		"tool_use_id":  toolUseID,
-		"content":      content,
+		"type":        "tool_result",
+		"tool_use_id": toolUseID,
+		"content":     content,
 	})
 	return b
 }

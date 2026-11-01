@@ -55,7 +55,8 @@ class TokenRefresher(private val pool: AccountPool) {
 
     suspend fun refreshOne(accountId: Int, refreshToken: String) {
         try {
-            val result = ClaudeOAuth.refresh(Http.client, refreshToken)
+            // through the account's own proxy: the refresh is part of how the account presents
+            val result = ClaudeOAuth.refresh(Http.clientFor(pool.get(accountId)?.proxy), refreshToken)
             val cur = pool.get(accountId)?.secret ?: AccountSecret()
             val updated = cur.copy(
                 accessToken = result.accessToken,
@@ -97,7 +98,7 @@ class TokenRefresher(private val pool: AccountPool) {
         if (acc.health == AccountHealth.DEAD) return
         val token = acc.secret.accessToken ?: return
         if (!uuidLookups.add("${acc.id}:${token.hashCode()}")) return
-        val uuid = runCatching { ClaudeOAuth.fetchAccountUuid(Http.client, token) }
+        val uuid = runCatching { ClaudeOAuth.fetchAccountUuid(Http.clientFor(acc), token) }
             .onFailure { log.warn("Profile lookup failed for account {}: {}", acc.id, it.message) }
             .getOrNull()
         if (uuid == null) {

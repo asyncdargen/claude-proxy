@@ -5,7 +5,11 @@ import org.claudeproxy.db.AccountSecrets
 import org.claudeproxy.db.Accounts
 import org.claudeproxy.model.AccountDto
 import org.claudeproxy.model.AccountHealth
+import org.claudeproxy.model.AccountKind
+import org.claudeproxy.model.ApiAuthStyle
+import org.claudeproxy.model.ProxyType
 import org.claudeproxy.model.AccountType
+import org.claudeproxy.model.ApiKeyMode
 import org.claudeproxy.model.LimitState
 import org.claudeproxy.model.LimitStatus
 import org.claudeproxy.model.WindowKind
@@ -31,11 +35,12 @@ data class AccountRuntime(
     val id: Int,
     val name: String,
     val type: AccountType,
+    val apiKeyMode: ApiKeyMode = ApiKeyMode.CLAUDE_CODE,
     val groupId: Int?,
     val ownerId: Int?,
     val priority: Int,
     val threshold: Double,
-    val coefficient: Double,
+    val kind: AccountKind = AccountKind.NONE,
     val enabled: Boolean,
     val overThreshold: Boolean,
     val health: AccountHealth,
@@ -45,7 +50,25 @@ data class AccountRuntime(
     val accountUuid: String? = null,
     val secret: AccountSecret,
     val limit: LimitState,
+    // API keys only: custom upstream + how the key is presented to it
+    val baseUrl: String? = null,
+    val apiAuthStyle: ApiAuthStyle = ApiAuthStyle.X_API_KEY,
+    // outbound proxy for every upstream call made for this account (null = direct/global egress)
+    val proxy: AccountProxy? = null,
 ) {
+    val isApiKey: Boolean get() = type == AccountType.API_KEY
+
+    /** Upstream this account talks to, when it is not api.anthropic.com (API keys only). */
+    val upstreamBaseUrl: String? get() = baseUrl?.takeIf { isApiKey && it.isNotBlank() }?.trimEnd('/')
+
+    /**
+     * A subscription whose responses carry the weekly window but no 5-hour one: a verified Ultra
+     * plan, which Anthropic no longer gives a session window. Until anything is observed the
+     * account is assumed to have both.
+     */
+    val fiveHourLimited: Boolean get() =
+        isApiKey || limit.window(WindowKind.FIVE_HOUR) != null || limit.window(WindowKind.WEEKLY) == null
+
     /**
      * What goes into metadata.user_id.account_uuid for this account: its own uuid for a
      * subscription, "" for an API key (that is what Claude Code itself sends in API-key mode)
@@ -59,21 +82,26 @@ data class AccountRuntime(
         // constraint that governs immediate use. Basing it on the max across windows let the
         // weekly window dominate, so a fresh-5h account looked saturated. Fall back to the max
         // when no 5-hour reading exists yet.
+        // A weekly-only (Ultra) account falls back to the weekly reading, which is its real bound.
+        // API keys have no windows and stay out of headroom altogether.
         val shortTermUsage = limit.window(WindowKind.FIVE_HOUR)?.usageFraction() ?: usage
-        val effRemaining = shortTermUsage?.let { coefficient * (1.0 - it) }
-            ?: if (type == AccountType.API_KEY) coefficient else null
+        val effRemaining = if (isApiKey) null else shortTermUsage?.let { kind.fiveHourWeight * (1.0 - it) }
         return AccountDto(
-            id = id, name = name, type = type.name, groupId = groupId, ownerId = ownerId, priority = priority,
-            threshold = threshold, coefficient = coefficient, enabled = enabled,
+            id = id, name = name, type = type.name, apiKeyMode = apiKeyMode.name,
+            baseUrl = upstreamBaseUrl, apiAuthStyle = apiAuthStyle.name,
+            groupId = groupId, ownerId = ownerId, priority = priority,
+            threshold = threshold, kind = kind.name, enabled = enabled,
             overThreshold = overThreshold,
             health = health.name,
-            fiveHour = limit.window(WindowKind.FIVE_HOUR)?.toDto(),
-            weekly = limit.window(WindowKind.WEEKLY)?.toDto(),
-            overage = limit.overage?.toDto(),
-            grace = limit.grace?.takeIf { !it.isEmpty() }?.toDto(),
-            usageFraction = usage,
+            fiveHour = if (isApiKey) null else limit.window(WindowKind.FIVE_HOUR)?.toDto(),
+            weekly = if (isApiKey) null else limit.window(WindowKind.WEEKLY)?.toDto(),
+            overage = if (isApiKey) null else limit.overage?.toDto(),
+            grace = if (isApiKey) null else limit.grace?.takeIf { !it.isEmpty() }?.toDto(),
+            usageFraction = if (isApiKey) null else usage,
             rateLimitedUntil = limit.rateLimitedUntil?.toString(),
             effectiveRemaining = effRemaining,
+            fiveHourLimited = fiveHourLimited,
+            proxy = proxy?.toDto(),
             totalInputTokens = counts.input,
             totalOutputTokens = counts.output,
             totalCacheReadTokens = counts.cacheRead,
@@ -157,11 +185,12 @@ object AccountRepo {
                 id = id,
                 name = row[Accounts.name],
                 type = AccountType.fromString(row[Accounts.type]) ?: AccountType.API_KEY,
+                apiKeyMode = ApiKeyMode.fromString(row[Accounts.apiKeyMode]) ?: ApiKeyMode.CLAUDE_CODE,
                 groupId = row[Accounts.groupId],
                 ownerId = row[Accounts.ownerId],
                 priority = row[Accounts.priority],
                 threshold = row[Accounts.threshold],
-                coefficient = row[Accounts.coefficient],
+                kind = AccountKind.fromString(row[Accounts.kind]) ?: AccountKind.NONE,
                 enabled = row[Accounts.enabled],
                 overThreshold = row[Accounts.overThreshold],
                 health = runCatching { AccountHealth.valueOf(row[Accounts.health]) }.getOrDefault(AccountHealth.OK),
@@ -169,8 +198,38 @@ object AccountRepo {
                 accountUuid = row[Accounts.accountUuid],
                 secret = secret,
                 limit = limit,
+                baseUrl = row[Accounts.baseUrl],
+                apiAuthStyle = ApiAuthStyle.fromString(row[Accounts.apiAuthStyle]) ?: ApiAuthStyle.X_API_KEY,
+                proxy = proxyOf(row),
             )
             rt to row[Accounts.createdAt]
+        }
+    }
+
+    private fun proxyOf(row: org.jetbrains.exposed.sql.ResultRow): AccountProxy? {
+        val type = ProxyType.fromString(row[Accounts.proxyType]) ?: ProxyType.NONE
+        if (type == ProxyType.NONE) return null
+        val host = row[Accounts.proxyHost] ?: return null
+        val port = row[Accounts.proxyPort] ?: return null
+        val password = row[Accounts.proxyPasswordCipher]?.let { runCatching { Secrets.crypto.decrypt(it) }.getOrNull() }
+        return AccountProxy(type, host, port, row[Accounts.proxyUsername], password)
+    }
+
+    /**
+     * Replace an account's proxy. [password] null keeps the stored one (the UI never sees it, so an
+     * edit that does not touch the field must not wipe it); "" clears it.
+     */
+    fun setProxy(id: Int, type: ProxyType, host: String?, port: Int?, username: String?, password: String?) = transaction {
+        Accounts.update({ Accounts.id eq id }) {
+            it[proxyType] = type.name
+            if (type == ProxyType.NONE) {
+                it[proxyHost] = null; it[proxyPort] = null; it[proxyUsername] = null; it[proxyPasswordCipher] = null
+            } else {
+                it[proxyHost] = host?.trim()
+                it[proxyPort] = port
+                it[proxyUsername] = username?.trim()?.ifEmpty { null }
+                if (password != null) it[proxyPasswordCipher] = password.ifEmpty { null }?.let { p -> Secrets.crypto.encrypt(p) }
+            }
         }
     }
 
@@ -203,20 +262,28 @@ object AccountRepo {
     }
 
     fun create(
-        name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, coefficient: Double,
+        name: String, type: AccountType, groupId: Int?, priority: Int, threshold: Double, kind: AccountKind,
         secret: AccountSecret, createdBy: Int?, ownerId: Int? = null,
         deviceId: String = generateDeviceId(),
         accountUuid: String? = null,
+        apiKeyMode: ApiKeyMode = ApiKeyMode.CLAUDE_CODE,
+        baseUrl: String? = null,
+        apiAuthStyle: ApiAuthStyle = ApiAuthStyle.X_API_KEY,
     ): Int = transaction {
+        val api = type == AccountType.API_KEY
         val id = Accounts.insert {
             it[Accounts.name] = name
             it[Accounts.type] = type.name
+            it[Accounts.apiKeyMode] = if (api) apiKeyMode.name else ApiKeyMode.CLAUDE_CODE.name
+            it[Accounts.baseUrl] = baseUrl?.trim()?.ifEmpty { null }?.takeIf { api }
+            it[Accounts.apiAuthStyle] = if (api) apiAuthStyle.name else ApiAuthStyle.X_API_KEY.name
+            // an API key is not a subscription plan
+            it[Accounts.kind] = if (api) AccountKind.NONE.name else kind.name
             // personal accounts are owner-scoped, never grouped
             it[Accounts.groupId] = if (ownerId != null) null else groupId
             it[Accounts.ownerId] = ownerId
             it[Accounts.priority] = priority
             it[Accounts.threshold] = threshold
-            it[Accounts.coefficient] = coefficient
             it[enabled] = true
             it[health] = AccountHealth.OK.name
             it[Accounts.deviceId] = deviceId
@@ -232,17 +299,28 @@ object AccountRepo {
     }
 
     fun updateConfig(
-        id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, coefficient: Double?,
+        id: Int, name: String?, groupId: Int?, priority: Int?, threshold: Double?, kind: AccountKind?,
         enabled: Boolean?, deviceId: String?, clearGroup: Boolean = false, overThreshold: Boolean? = null,
         accountUuid: String? = null,
+        apiKeyMode: ApiKeyMode? = null,
+        baseUrl: String? = null,
+        apiAuthStyle: ApiAuthStyle? = null,
     ) = transaction {
+        // an edit that only touches the proxy (saved separately) has nothing for this UPDATE
+        val touches = clearGroup || listOf(name, groupId, priority, threshold, kind, enabled, apiKeyMode, baseUrl,
+            apiAuthStyle, overThreshold, deviceId, accountUuid).any { it != null }
+        if (!touches) return@transaction
         Accounts.update({ Accounts.id eq id }) {
             if (name != null) it[Accounts.name] = name
             if (clearGroup) it[Accounts.groupId] = null else if (groupId != null) it[Accounts.groupId] = groupId
             if (priority != null) it[Accounts.priority] = priority
             if (threshold != null) it[Accounts.threshold] = threshold
-            if (coefficient != null) it[Accounts.coefficient] = coefficient
+            if (kind != null) it[Accounts.kind] = kind.name
+            // "" clears it; null leaves it alone
+            if (baseUrl != null) it[Accounts.baseUrl] = baseUrl.trim().ifEmpty { null }
+            if (apiAuthStyle != null) it[Accounts.apiAuthStyle] = apiAuthStyle.name
             if (enabled != null) it[Accounts.enabled] = enabled
+            if (apiKeyMode != null) it[Accounts.apiKeyMode] = apiKeyMode.name
             if (overThreshold != null) it[Accounts.overThreshold] = overThreshold
             if (deviceId != null) it[Accounts.deviceId] = deviceId
             // "" clears it (an operator undoing a wrong value); null leaves it alone
@@ -272,6 +350,11 @@ object AccountRepo {
     }
 
     fun persistLimit(id: Int, limit: LimitState) = transaction {
+        // A window upstream stopped reporting (Ultra losing its 5-hour window) must not come back
+        // from the table on the next start.
+        WindowKind.entries.filter { it !in limit.windows }.forEach { k ->
+            AccountLimits.deleteWhere { (accountId eq id) and (windowKind eq k.code) }
+        }
         limit.windows.forEach { (kind, w) ->
             AccountLimits.upsert {
                 it[accountId] = id

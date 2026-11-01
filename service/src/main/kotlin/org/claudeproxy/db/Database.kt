@@ -12,6 +12,7 @@ import org.jetbrains.exposed.sql.insertIgnore
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.time.Instant
@@ -52,7 +53,7 @@ object Db {
             migrateGlobalPoolPermission()
             migrateChatPermission()
             migrateWindowAttributionPermission()
-            migrateWindowSnapshotCoefficient()
+            migrateAccountKind()
             seedAdmin(config)
         }
         org.claudeproxy.repo.ModelPriceRepo.seedDefaults()
@@ -150,19 +151,22 @@ object Db {
     }
 
     /**
-     * One-time backfill of window_snapshots.coefficient (added for the coefficient-weighted
-     * charts). Pre-existing rows carry no recorded coefficient; set each to its account's
-     * *current* coefficient so the historical ×coef view is populated. New rows always write
-     * the live coefficient, and this touches only NULL rows — so changing an account's
-     * coefficient never rewrites old points. Idempotent (no NULLs remain after the first run).
-     * The correlated subquery form runs on both PostgreSQL and SQLite.
+     * One-time translation of the legacy capacity coefficient into the account's plan: ×20 was the
+     * Max 20x plan (now Ultra), ×5 Max, anything else Pro. API keys are not subscriptions and stay
+     * NONE. Runs once (settings marker), so a plan an admin later corrects is never overwritten.
      */
-    private fun migrateWindowSnapshotCoefficient() {
-        org.jetbrains.exposed.sql.transactions.TransactionManager.current().exec(
-            "UPDATE window_snapshots SET coefficient = " +
-                "(SELECT coefficient FROM accounts WHERE accounts.id = window_snapshots.account_id) " +
-                "WHERE coefficient IS NULL",
-        )
+    private fun migrateAccountKind() {
+        val markerKey = "migrated:account_kind"
+        if (Settings.selectAll().where { Settings.key eq markerKey }.any()) return
+        Accounts.selectAll().forEach { row ->
+            if (row[Accounts.type] == org.claudeproxy.model.AccountType.API_KEY.name) return@forEach
+            val kind = org.claudeproxy.model.AccountKind.fromLegacyCoefficient(row[Accounts.coefficient])
+            Accounts.update({ Accounts.id eq row[Accounts.id] }) { it[Accounts.kind] = kind.name }
+        }
+        Settings.insert {
+            it[key] = markerKey
+            it[value] = Instant.now().toString()
+        }
     }
 
     /** Create the bootstrap admin user from config if no users exist yet. */

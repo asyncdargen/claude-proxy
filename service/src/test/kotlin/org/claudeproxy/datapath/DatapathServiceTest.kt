@@ -50,7 +50,7 @@ class DatapathServiceTest {
         // One OAUTH account in the global pool.
         AccountRepo.create(
             name = "acc1", type = AccountType.OAUTH, groupId = null, priority = 10,
-            threshold = 0.8, coefficient = 1.0,
+            threshold = 0.8, kind = org.claudeproxy.model.AccountKind.PRO,
             secret = AccountSecret(accessToken = "sk-ant-oat-TESTTOKEN", refreshToken = "r"),
             createdBy = adminId,
         )
@@ -225,7 +225,7 @@ class DatapathServiceTest {
         val token = ProxyTokenRepo.create(uid, "$name-tok").token!!
         val accId = AccountRepo.create(
             name = "$name-personal", type = AccountType.OAUTH, groupId = null, priority = 5,
-            threshold = 0.8, coefficient = 1.0,
+            threshold = 0.8, kind = org.claudeproxy.model.AccountKind.PRO,
             secret = AccountSecret(accessToken = "sk-ant-oat-PERSONAL", refreshToken = "r"),
             createdBy = uid, ownerId = uid,
         )

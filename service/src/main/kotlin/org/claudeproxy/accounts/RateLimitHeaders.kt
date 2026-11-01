@@ -64,7 +64,15 @@ object RateLimitHeaders {
 
         val windows = prev.windows.toMutableMap()
         var changed = false
+        // A verified Ultra plan has no 5-hour window: its responses carry the 7d family and the
+        // generic `unified-reset`/`unified-status`, but not a single `-5h-` header. Reading those
+        // generic fallbacks as the 5-hour window painted a phantom 5h cell resetting at the weekly
+        // time; drop the window instead, so the account reads as weekly-only.
+        val weeklyOnly = rl.keys.any { it.startsWith("anthropic-ratelimit-unified-7d") } &&
+            rl.keys.none { it.startsWith("anthropic-ratelimit-unified-5h") }
+        if (weeklyOnly && windows.remove(WindowKind.FIVE_HOUR) != null) changed = true
         for ((kind, keys) in KEYS) {
+            if (weeklyOnly && kind == WindowKind.FIVE_HOUR) continue
             val util = firstDouble(lower, keys.utilization)
             val remaining = firstDouble(lower, keys.remaining)
             val limit = firstDouble(lower, keys.limit)

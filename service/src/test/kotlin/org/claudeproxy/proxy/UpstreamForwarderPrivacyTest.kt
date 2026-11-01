@@ -44,7 +44,7 @@ class UpstreamForwarderPrivacyTest {
             val pool = AccountPool()
             val accounts = runBlocking {
                 val ids = listOf(AccountType.OAUTH, AccountType.API_KEY).map { type ->
-                    AccountRepo.create("privacy-$type", type, null, 10, 0.9, 1.0,
+                    AccountRepo.create("privacy-$type", type, null, 10, 0.9, org.claudeproxy.model.AccountKind.PRO,
                         AccountSecret(accessToken = "fake-connected-oauth", apiKey = "fake-connected-api-key"), createdBy = null)
                 }
                 pool.reload()

@@ -1,14 +1,17 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"claudeproxy/gateway/internal/anthropic"
+	"claudeproxy/gateway/internal/apiprofile"
 	"claudeproxy/gateway/internal/ccident"
 	"claudeproxy/gateway/internal/control"
 )
@@ -50,10 +53,24 @@ func (h *Handler) forward(
 ) forwardResult {
 	outBody, sessionID := rewriteBody(ensureClaudeCodeSystem(body, cand.Type, r.URL.Path), cand.DeviceID, cand.AccountUUID, r.Header.Get("X-Claude-Code-Session-Id"))
 
-	url := h.cfg.UpstreamBaseURL + r.URL.RequestURI()
+	// attemptFailed ends an attempt that never reached upstream: the next account takes over, or,
+	// on the last one, the client gets a 502 in whatever form the response still allows.
+	attemptFailed := func() forwardResult {
+		if canRetry {
+			return forwardResult{retry: true, headSent: headSent, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
+		}
+		failAfterHead(w, headSent, cands, idx, http.StatusBadGateway, "api_error", "upstream request failed")
+		return forwardResult{retry: false, headSent: headSent, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: http.StatusBadGateway}}
+	}
+
+	url, err := cand.UpstreamURL(h.cfg.UpstreamBaseURL, r.URL.RequestURI())
+	if err != nil {
+		log.Printf("proxy: account %d: %v; attempt failed", cand.AccountID, err)
+		return attemptFailed()
+	}
 	req, err := http.NewRequestWithContext(ctx, r.Method, url, strings.NewReader(string(outBody)))
 	if err != nil {
-		return forwardResult{retry: canRetry, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
+		return attemptFailed()
 	}
 
 	// Copy client headers except the strip-set and telemetry headers.
@@ -81,18 +98,34 @@ func (h *Handler) forward(
 			req.Header.Set(k, v)
 		}
 	}
+	// An API key presents the product surface its account is configured for (plain API, Agent
+	// SDK or Claude Code); the body is rebuilt below, so its length follows the rewrite.
+	outBody = apiprofile.Apply(req.Header, outBody, cand.Type, cand.APIKeyMode, r.URL.Path)
 	// Anthropic requires this header; inject a default if the client omitted it.
 	if r.Header.Get("anthropic-version") == "" {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	// GetBody too, not just Body: net/http replays a request through it (HTTP/2 GOAWAY retry),
+	// and the one NewRequest set up would replay the pre-profile body.
 	if len(outBody) == 0 {
-		req.Body = http.NoBody
+		req.Body, req.GetBody = http.NoBody, nil
 		req.ContentLength = 0
 	} else {
-		req.ContentLength = int64(len(outBody))
+		final := outBody
+		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(final)), nil }
+		req.Body, _ = req.GetBody()
+		req.ContentLength = int64(len(final))
 	}
 
-	resp, headSent, err := h.doWithEarlyHead(w, req, streamRequested(outBody), headSent)
+	// The account's own outbound proxy, else the gateway-wide route. A proxy URL that does not
+	// validate fails this attempt like a dead upstream would — never a quiet direct connection.
+	client, err := h.upstreams.Client(cand.ProxyURL)
+	if err != nil {
+		log.Printf("proxy: account %d: unusable outbound proxy (%v); attempt failed", cand.AccountID, err)
+		return attemptFailed()
+	}
+
+	resp, headSent, err := h.doWithEarlyHead(w, client, req, streamRequested(outBody), headSent)
 	if err != nil {
 		if canRetry {
 			return forwardResult{retry: true, headSent: headSent, report: control.UsageReport{AccountID: cand.AccountID, UserID: userID, TokenID: tokenID, Status: 0}}
@@ -157,12 +190,12 @@ func (h *Handler) forward(
 // sends during silence: SSE consumers discard them, so an early head costs the client nothing and
 // still leaves the stream a blank slate another account can take over.
 func (h *Handler) doWithEarlyHead(
-	w http.ResponseWriter, req *http.Request, streaming, headSent bool,
+	w http.ResponseWriter, client *http.Client, req *http.Request, streaming, headSent bool,
 ) (*http.Response, bool, error) {
 	// A non-streaming client is waiting on a JSON body — opening an event-stream for it would
 	// hand it a response it cannot parse, so those requests keep waiting in silence.
 	if headSent || !streaming || h.cfg.EarlyHeadTimeout <= 0 {
-		resp, err := h.upstream.Do(req)
+		resp, err := client.Do(req)
 		return resp, headSent, err
 	}
 
@@ -173,7 +206,7 @@ func (h *Handler) doWithEarlyHead(
 	// Buffered so the request goroutine can always finish, even if we stopped reading.
 	done := make(chan upstreamResult, 1)
 	go func() {
-		resp, err := h.upstream.Do(req)
+		resp, err := client.Do(req)
 		done <- upstreamResult{resp, err}
 	}()
 

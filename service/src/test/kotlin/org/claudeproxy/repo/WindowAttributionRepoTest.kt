@@ -18,11 +18,11 @@ class WindowAttributionRepoTest {
             val t=Instant.parse("2026-10-15T00:00:00Z")
             val alice=UserRepo.create("alice","pw",listOf("user"),emptyList(),null)
             val bob=UserRepo.create("bob","pw",listOf("user"),emptyList(),null)
-            val ids=(1..10).map { AccountRepo.create("shared-$it",AccountType.OAUTH,null,1,0.9,1.0,AccountSecret(accessToken="test"),null) }
+            val ids=(1..10).map { AccountRepo.create("shared-$it",AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(accessToken="test"),null) }
             val id=ids.first()
             transaction {
                 for ((seconds,util) in listOf(0L to 0.2,60L to 0.6,120L to 0.8)) WindowSnapshots.insert {
-                    it[accountId]=id; it[windowKind]="5h"; it[ts]=t.plusSeconds(seconds); it[utilization]=util; it[coefficient]=1.0
+                    it[accountId]=id; it[windowKind]="5h"; it[ts]=t.plusSeconds(seconds); it[utilization]=util
                 }
                 for ((seconds,user,cost) in listOf(Triple(20L,alice,1.0),Triple(40L,bob,3.0),Triple(90L,alice,0.0))) UsageEvents.insert {
                     it[accountId]=id; it[userId]=user; it[ts]=t.plusSeconds(seconds); it[UsageEvents.cost]=cost
@@ -50,16 +50,17 @@ class WindowAttributionRepoTest {
         } finally { file.delete() }
     }
 
-    @Test fun `api-key per-minute remaining and limit is not presented as a quota window`() {
+    @Test fun `api keys are left out of window attribution entirely`() {
         val file=freshDb()
         try {
             val now=Instant.parse("2026-10-15T00:00:00Z")
-            val id=AccountRepo.create("api-key",AccountType.API_KEY,null,1,0.9,1.0,AccountSecret(apiKey="k"),null)
+            val id=AccountRepo.create("api-key",AccountType.API_KEY,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(apiKey="k"),null)
             AccountRepo.persistLimit(id,org.claudeproxy.model.LimitState(windows=mapOf(
                 org.claudeproxy.model.WindowKind.FIVE_HOUR to org.claudeproxy.model.WindowLimit(remaining=10.0,limitTotal=100.0,
                     resetAt=now.plusSeconds(30),updatedAt=now.minusSeconds(5)))))
             val r=WindowAttributionRepo.fetch(1,now)
-            assertTrue(r.accounts.single().windows.all { it.periods.isEmpty() })
+            // per-minute remaining/limit is not a quota window, and a key has no other kind
+            assertTrue(r.accounts.isEmpty())
         } finally { file.delete() }
     }
 }

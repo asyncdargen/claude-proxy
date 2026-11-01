@@ -973,3 +973,20 @@ td.totalcell { cursor: default; }
   /* The copy button overlapping a wrapped command is unusable — give it its own line. */
   .copybtn { position: static; display: block; margin-top: 8px; }
 }
+
+/* ---- account forms: grouped sections, plan badges ---- */
+fieldset.form-section { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px 2px; margin: 4px 0 14px; background: var(--panel-2); min-width: 0; }
+fieldset.form-section > legend { padding: 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.field > span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; font-weight: 500; }
+div.field { margin-bottom: 13px; }
+.field-note { display: block; margin-top: 6px; line-height: 1.45; }
+.grid-host { display: grid; grid-template-columns: 1fr 110px; gap: 0 14px; }
+details.form-advanced { margin: 2px 0 10px; }
+details.form-advanced > summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 500; margin-bottom: 10px; user-select: none; }
+.acct-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.api-upstream { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.badge.plan { letter-spacing: .02em; }
+.badge.plan-pro { background: color-mix(in srgb, var(--accent-2) 14%, transparent); color: var(--accent-2); }
+.badge.plan-max { background: var(--accent-soft); color: var(--accent-ink); }
+.badge.plan-ultra { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 22%, transparent), color-mix(in srgb, var(--accent-2) 22%, transparent)); color: var(--text); }
+@media (max-width: 640px) { .grid-host { grid-template-columns: 1fr 90px; } }

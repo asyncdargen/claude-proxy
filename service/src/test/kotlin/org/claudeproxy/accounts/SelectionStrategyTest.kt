@@ -29,12 +29,12 @@ class SelectionStrategyTest {
         weeklyResetInHours: Double?,
         fiveHourUsage: Double = 0.0,
         weeklyUsage: Double = 0.0,
-        coefficient: Double = 1.0,
+        kind: org.claudeproxy.model.AccountKind = org.claudeproxy.model.AccountKind.PRO,
         threshold: Double = 0.99,
         overThreshold: Boolean = true,
     ) = AccountRuntime(
         id = id, name = "a$id", type = AccountType.OAUTH, groupId = null, ownerId = null,
-        priority = priority, threshold = threshold, coefficient = coefficient, enabled = true,
+        priority = priority, threshold = threshold, kind = kind, enabled = true,
         overThreshold = overThreshold, health = AccountHealth.OK, deviceId = null,
         secret = AccountSecret(),
         limit = LimitState(
@@ -71,9 +71,9 @@ class SelectionStrategyTest {
     fun `a three-account pool orders by deadline, not by the configured priority`() {
         // Priority 1 resets in 38h, priority 2 in 26h, priority 99 in 167h: the configured
         // order is the exact inverse of the order the deadlines ask for.
-        val first = acct(id = 5, priority = 1, weeklyResetInHours = 38.0, weeklyUsage = 0.90, coefficient = 5.0)
-        val second = acct(id = 6, priority = 2, weeklyResetInHours = 26.0, weeklyUsage = 0.88, coefficient = 5.0)
-        val third = acct(id = 2, priority = 99, weeklyResetInHours = 167.0, weeklyUsage = 0.0, coefficient = 5.0)
+        val first = acct(id = 5, priority = 1, weeklyResetInHours = 38.0, weeklyUsage = 0.90, kind = org.claudeproxy.model.AccountKind.MAX)
+        val second = acct(id = 6, priority = 2, weeklyResetInHours = 26.0, weeklyUsage = 0.88, kind = org.claudeproxy.model.AccountKind.MAX)
+        val third = acct(id = 2, priority = 99, weeklyResetInHours = 167.0, weeklyUsage = 0.0, kind = org.claudeproxy.model.AccountKind.MAX)
         assertEquals(listOf(6, 5, 2), order(first, second, third))
     }
 
@@ -96,10 +96,10 @@ class SelectionStrategyTest {
     }
 
     @Test
-    fun `five-hour headroom is weighted by the capacity coefficient`() {
+    fun `five-hour headroom is weighted by the account plan`() {
         // Same fraction used, same bucket: the x5 account can absorb five times the burst.
-        val small = acct(id = 1, priority = 1, weeklyResetInHours = 3.0, fiveHourUsage = 0.5, coefficient = 1.0)
-        val big = acct(id = 2, priority = 2, weeklyResetInHours = 3.0, fiveHourUsage = 0.5, coefficient = 5.0)
+        val small = acct(id = 1, priority = 1, weeklyResetInHours = 3.0, fiveHourUsage = 0.5, kind = org.claudeproxy.model.AccountKind.PRO)
+        val big = acct(id = 2, priority = 2, weeklyResetInHours = 3.0, fiveHourUsage = 0.5, kind = org.claudeproxy.model.AccountKind.MAX)
         assertEquals(listOf(2, 1), order(small, big))
     }
 

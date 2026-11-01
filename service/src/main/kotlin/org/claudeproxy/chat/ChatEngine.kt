@@ -263,11 +263,11 @@ class ChatEngine(
     ): Attempt {
         val sessionId = ClaudeCodeClient.dailySession("chat:$userId", account.id)
         val stamped = ClaudeCodeClient.stamp(body, account, sessionId)
-        val statement = Http.client.prepareRequest("$upstreamBaseUrl/v1/messages") {
+        val statement = Http.clientFor(account).prepareRequest("${account.upstreamBaseUrl ?: upstreamBaseUrl}/v1/messages") {
             method = HttpMethod.Post
             header("anthropic-version", "2023-06-01")
             ClaudeCodeClient.applyHeaders(this, sessionId)
-            UpstreamAuth.apply(this, account.type, account.secret)
+            UpstreamAuth.apply(this, account)
             setBody(object : OutgoingContent.ByteArrayContent() {
                 override val contentType = ContentType.Application.Json
                 override val contentLength = stamped.size.toLong()
@@ -510,11 +510,11 @@ class ChatEngine(
         for (account in order.take(2)) {
             val sessionId = ClaudeCodeClient.dailySession("chat:${user.id}", account.id)
             val stamped = ClaudeCodeClient.stamp(bytes, account, sessionId)
-            val result = Http.client.prepareRequest("$upstreamBaseUrl/v1/messages") {
+            val result = Http.clientFor(account).prepareRequest("${account.upstreamBaseUrl ?: upstreamBaseUrl}/v1/messages") {
                 method = HttpMethod.Post
                 header("anthropic-version", "2023-06-01")
                 ClaudeCodeClient.applyHeaders(this, sessionId)
-                UpstreamAuth.apply(this, account.type, account.secret)
+                UpstreamAuth.apply(this, account)
                 setBody(object : OutgoingContent.ByteArrayContent() {
                     override val contentType = ContentType.Application.Json
                     override val contentLength = stamped.size.toLong()

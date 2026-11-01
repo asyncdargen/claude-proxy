@@ -35,10 +35,15 @@ data class SessionEndRequest(val requestId: String)
 data class CandidateDto(
     val accountId: Int,
     val type: String,
+    val apiKeyMode: String = "CLAUDE_CODE",
     val deviceId: String? = null,
     // OAuth accounts only: the Anthropic account uuid for metadata.user_id.account_uuid
     val accountUuid: String? = null,
     val authHeaders: Map<String, String> = emptyMap(),
+    // custom upstream for this account ("" / null = the gateway's UPSTREAM_BASE_URL)
+    val baseUrl: String? = null,
+    // per-account outbound proxy, credentials included (null = the gateway's global egress)
+    val proxyUrl: String? = null,
     val fiveHourResetEpoch: Long? = null,
     val weeklyResetEpoch: Long? = null,
 )

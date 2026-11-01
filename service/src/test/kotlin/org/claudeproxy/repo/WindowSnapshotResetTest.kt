@@ -15,8 +15,8 @@ class WindowSnapshotResetTest {
             val t=Instant.parse("2040-01-01T00:00:00Z")
             repeat(2) {
                 files += freshDb()
-                val id=AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,1.0,AccountSecret(accessToken="test"),null)
-                WindowSnapshotRepo.record(id,WindowKind.FIVE_HOUR,0.2,1.0,t)
+                val id=AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(accessToken="test"),null)
+                WindowSnapshotRepo.record(id,WindowKind.FIVE_HOUR,0.2,t)
                 assertEquals(1,WindowSnapshotRepo.fetch(t,t.plusSeconds(1)).size)
             }
         } finally { files.forEach { it.delete() } }
@@ -25,8 +25,8 @@ class WindowSnapshotResetTest {
     @Test fun `pool snapshot preserves observation time instead of refreshing stale window on write`() = kotlinx.coroutines.runBlocking {
         val file = freshDb()
         try {
-            AccountRepo.create("other",AccountType.OAUTH,null,1,0.9,1.0,AccountSecret(accessToken="test"),null)
-            val id=AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,1.0,AccountSecret(accessToken="test"),null)
+            AccountRepo.create("other",AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(accessToken="test"),null)
+            val id=AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(accessToken="test"),null)
             val observed=Instant.now().minusSeconds(600)
             val pool=org.claudeproxy.accounts.AccountPool()
             pool.reload()
@@ -41,12 +41,12 @@ class WindowSnapshotResetTest {
     @Test fun `new snapshots retain actual reset timestamps while legacy samples default to null`() {
         val file = freshDb()
         try {
-            val id = AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,1.0,AccountSecret(accessToken="test"),null)
+            val id = AccountRepo.create("shared",AccountType.OAUTH,null,1,0.9,org.claudeproxy.model.AccountKind.PRO,AccountSecret(accessToken="test"),null)
             val t = Instant.parse("2030-01-01T00:00:00Z")
-            WindowSnapshotRepo.record(id,WindowKind.FIVE_HOUR,0.2,1.0,t,resetAt=t.plusSeconds(18000))
+            WindowSnapshotRepo.record(id,WindowKind.FIVE_HOUR,0.2,t,resetAt=t.plusSeconds(18000))
             val sample = WindowSnapshotRepo.fetch(t,t.plusSeconds(1)).single()
             assertEquals(t.plusSeconds(18000),sample.resetAt)
-            assertNull(WindowSample(id,"5h",t,0.2,1.0).resetAt)
+            assertNull(WindowSample(id,"5h",t,0.2).resetAt)
         } finally { file.delete() }
     }
 }

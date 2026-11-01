@@ -10,7 +10,7 @@ API. It stores several Anthropic accounts (OAuth subscriptions and/or API keys),
 request to the highest-priority account that still has headroom, falls back when all are
 saturated, tracks USD cost and rolling-window limits, and ships a React admin UI with
 role-based access control. Production shape: a TLS-terminating host proxy (nginx/Caddy, optionally
-behind a CDN) in front of an in-compose nginx router on `127.0.0.1:8080`.
+behind a CDN) in front of the in-compose `web` container (nginx: SPA + router) on `127.0.0.1:8080`.
 
 ## Anthropic egress
 
@@ -23,14 +23,14 @@ authenticated tunnel. Browser sign-in/telemetry/app updates are not server traff
 
 ## Components & URL routing
 
-The app is split into self-contained components fronted by one nginx router (in `docker-compose`,
-listening on `127.0.0.1:8080`). A host reverse proxy terminates TLS and proxies to `:8080`.
+The app is split into self-contained components fronted by one nginx — the **web** image, which
+serves the SPA itself and routes the rest (in `docker-compose`, listening on `127.0.0.1:8080`). A host reverse proxy terminates TLS and proxies to `:8080`.
 
 | Public path   | Component            | Notes                                                    |
 |---------------|----------------------|----------------------------------------------------------|
-| `/`           | **frontend** (SPA)   | React admin UI **+ the chat UI**, static, served by nginx (React Router) |
+| `/`           | **frontend** (SPA)   | React admin UI **+ the chat UI**, static, baked into and served by the web image (React Router) |
 | `/api/…`      | **service** (Kotlin) | Management REST API **+ the chat API/datapath** (`/api/chat/…`) |
-| `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (revert the two nginx `proxy_pass` targets). |
+| `/gateway/…`  | **gateway** (Go)     | Anthropic datapath (`/gateway/v1/…`), served by the Go **gateway** (Spec B). It resolves each request against the service's private `/internal/*` control API, forwards to Anthropic, relays SSE, and reports usage back. The Kotlin datapath (`service:8787`) stays running as an instant rollback (`DATAPATH_UPSTREAM=service:8787` on the web container; `/routing/*` stays on the gateway). |
 | `/routing/openai/…`    | **gateway** (Go, same container) | OpenAI Chat Completions API emulated over Claude Code subscriptions. Translates OpenAI↔Anthropic (streaming + tool calls), resolves via the control API with `source="routing"`. base_url = `<origin>/routing/openai/v1`. |
 | `/routing/anthropic/…` | **gateway** (Go, same container) | Native Anthropic Messages API served from Claude Code subscriptions (injects the Claude Code system prompt), `source="routing"`. base_url = `<origin>/routing/anthropic`. |
 
@@ -48,11 +48,18 @@ are one Go module (`gateway/`, binaries under `cmd/`); they never touch Postgres
 
 Top-level dirs: `frontend/` (React) · `service/` (Kotlin business logic + control API + Kotlin
 datapath/rollback) · `gateway/` (Go — one module: the Claude Code datapath at `gateway/main.go`
-serving all three paths off one port, split by prefix in `newMux`) · `deploy/` (nginx config
-+ Dockerfiles).
-Containers: `claude-proxy-{nginx,front,service,gateway,db}` — the whole Go data plane is one
-image and one container.
-`docker-compose.yml`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
+serving all three paths off one port, split by prefix in `newMux`) · `deploy/` (Dockerfiles,
+`web/` = the web image's nginx template + includes, `allinone/`, `compose/` = quick-start compose
+files) · `scripts/` (release-images, deploy, rollback, bootstrap).
+Images (GHCR, multi-arch, built by `docker-bake.hcl`): `ghcr.io/asyncdargen/claude-proxy-{service,gateway,web}`
++ the all-in-one `ghcr.io/asyncdargen/claude-proxy` (quick starts only). Containers:
+`claude-proxy-{nginx,service,gateway,db}` — `claude-proxy-nginx` runs the **web** image (compose
+service `web`); the old separate `front` container is gone. The whole Go data plane is one image
+and one container. The router's upstreams are env (`SERVICE_UPSTREAM`, `GATEWAY_UPSTREAM`,
+`DATAPATH_UPSTREAM`) held in nginx variables and re-resolved via Docker DNS every 10s — so
+`/gateway/` strips its prefix with an explicit `rewrite`, and the `/routing/*` locations must
+keep passing the prefix through verbatim.
+`docker-compose.yml`, `docker-bake.hcl`, `.env.example`, `.dockerignore` stay at the repo root (compose sits next
 to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructure-nginx-routing-design.md`.
 
 ## Stack
@@ -66,10 +73,12 @@ to server runtime state). See `docs/superpowers/specs/2026-07-12-repo-restructur
   this must become a shared cache again (a Redis implementation lived here until 2026-07 — see
   git history).
 - **Frontend:** React 18 + Vite + TypeScript, **react-router-dom** for section URLs, hand-rolled
-  SVG charts, no UI framework. Builds to `frontend/dist`; the nginx router serves it (same origin
+  SVG charts, no UI framework. Builds to `frontend/dist`; the web image bakes it in and serves it (same origin
   as the API — no CORS in prod).
-- **Packaging:** `docker-compose` stack — `nginx` (SPA + router) + `service` (Kotlin fat jar,
-  UI **not** baked in) + `postgres`.
+- **Packaging:** prebuilt GHCR images, `docker-compose` stack — `web` (nginx: SPA + router) +
+  `service` (Kotlin fat jar, UI **not** baked in) + `gateway` + `postgres`. Builder stages run on
+  `$BUILDPLATFORM` (Go cross-compiles via `TARGETOS/TARGETARCH`). Releases: `scripts/release-images.sh`
+  or a `v*` tag (`.github/workflows/images.yml`).
 
 ## Repository layout (`service/src/main/kotlin/org/claudeproxy/`)
 
@@ -107,25 +116,31 @@ cd service && ./gradlew test   # JUnit
 cd gateway && go test ./...    # Go gateway unit tests (go vet ./... too)
 cd gateway && go run .         # whole data plane on :9000 — /v1 datapath + /routing/{openai,anthropic}
                                # (needs SERVICE_URL + INTERNAL_TOKEN; DEFAULT_MODEL optional)
-docker-compose up -d --build   # nginx (:8080) + front + service + gateway(+openai/anthropic) + postgres
+docker compose up -d           # web (:8080) + service + gateway + postgres, images pulled from GHCR
+docker compose build           # …or build them locally from the checkout (same Dockerfiles)
+docker buildx bake -f docker-bake.hcl --print   # image definitions; always pass -f (bake would merge compose)
+scripts/release-images.sh --load                # native-arch local build; no args = multi-arch push
 ```
 
 The Gradle project now lives under `service/` — run `./gradlew` from there (or `service/gradlew
--p service …`). The frontend build is fully decoupled (nginx owns it); there is no `bundle` task.
+-p service …`). The frontend build is fully decoupled (the web image owns it); there is no `bundle` task.
 
 ## Deployment — read `docs/DEPLOY.md` before deploying
 
 A Docker Compose stack on one host, behind a TLS-terminating reverse proxy that points at the
-**in-compose nginx router** on `127.0.0.1:8080`; the compose nginx fans out to `service` and the
-Go gateways. `docs/DEPLOY.md` uses placeholders (`root@YOUR_SERVER`, `/opt/claude-proxy`,
+**in-compose web container** (nginx) on `127.0.0.1:8080`; it fans out to `service` and the Go
+gateway. **The server builds nothing:** `scripts/deploy.sh` (`DEPLOY_HOST=…`) snapshots running
+images as `:rollback-<ts>` + `pg_dump`s, `scp`s **only** `docker-compose.yml`, pulls, and recreates
+service → gateway → web one at a time, waiting for healthy; `scripts/rollback.sh` restores a
+snapshot. The compose file keeps `version: "2.4"` because the server may run Compose v1. `docs/DEPLOY.md` uses placeholders (`root@YOUR_SERVER`, `/opt/claude-proxy`,
 `proxy.example.com`) — real hostnames and paths belong in an operator-private note, never in the
 repo.
 
 > ⚠️ **NEVER `rsync --delete` into the deploy directory.** It holds runtime state
 > that is NOT in the repo: `pgdata/` (the entire Postgres DB, bind-mounted) and `.env` (server
-> secrets, incl. `DATABASE_PASSWORD`). A `--delete` once wiped the database. Sync **only
-> source**, without `--delete`, excluding `pgdata`, `.env`, `data`. Full recipe + safety in
-> `docs/DEPLOY.md`.
+> secrets, incl. `DATABASE_PASSWORD`). A `--delete` once wiped the database. The deploy now
+> copies one file (`docker-compose.yml`); never sync anything else into that directory, and never
+> touch `pgdata`, `.env`, `data`. Full recipe + safety in `docs/DEPLOY.md`.
 
 ## Config precedence gotcha
 
@@ -134,7 +149,7 @@ Because `.env` ships `BIND_HOST=127.0.0.1` (a local default), `docker-compose.ym
 override in the `service` `environment:` block — **do not remove it**:
 
 - `BIND_HOST: "0.0.0.0"` — the service must bind all interfaces inside the container, or the
-  compose **nginx** (reaching it as `service:8787` over the compose network) can't connect
+  compose **web** nginx (reaching it as `service:8787` over the compose network) can't connect
   (→ nginx 502, healthcheck fails).
 
 `PUBLIC_DOMAIN` is passed through from `.env` (`PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}`) — it sets the
@@ -146,6 +161,40 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
 
 - **Account types:** `OAUTH` (access+refresh, auto-refreshed), `OAUTH_STATIC` (access only),
   `API_KEY` (`x-api-key`). Secrets encrypted with `MASTER_KEY` (AES-256-GCM).
+- **Plan (`accounts.kind`, `AccountKind`):** `NONE` / `PRO` / `MAX` / `ULTRA` — Anthropic's
+  2026-10-30 rename (Max 5x → Max, Max 20x → Ultra). It replaced the old ×1/×5/×20 `coefficient`
+  (column kept only for the one-time `migrated:account_kind` backfill: ≥15 → ULTRA, ≥3 → MAX,
+  else PRO; API keys NONE) and is used **only** to weight pool headroom (5h: 1/5/20, weekly:
+  1/5/10) and the DEADLINE tiebreak — never as a selection gate. The ×coef chart toggles and the
+  weighted series are gone. **Verified Ultra has no 5-hour window:** its responses carry the 7d
+  family and the generic `unified-reset`/`unified-status` but no `-5h-` header. `RateLimitHeaders`
+  then drops `FIVE_HOUR` (and `persistLimit` deletes the stale row) instead of reading the generic
+  fallbacks as a phantom 5h window resetting at the weekly time; `AccountDto.fiveHourLimited=false`
+  renders "no 5h limit".
+- **API-key accounts are not subscriptions:** no windows (`AccountPool.updateLimit` discards the
+  per-minute `ratelimit-tokens-*` readings, only the 429 cooldown applies), no threshold (always
+  "under" in `tierOrder`), no plan, out of headroom and window attribution, no refresh. The probe is
+  a free key check (`GET <base>/v1/models`; 401/403 → `REFRESH_FAILED`, 404 leaves health alone —
+  a foreign gateway may not list models). Note `/v1/models` can answer 200 while inference is
+  blocked (e.g. an org held for `verification_required`): live 403s still don't mark the account.
+  Per key: `api_key_mode` (`CLAUDE_CODE` untouched / `AGENT_SDK` / `ANTHROPIC_API` — the header and
+  body rewrite lives in `gateway/internal/apiprofile`, applied on both Go datapaths),
+  `base_url` (any Anthropic-compatible upstream, e.g. another claude-proxy's `/gateway`) and
+  `api_auth_style` (`X_API_KEY` | `BEARER`). The service puts the right header in `authHeaders`
+  and ships `baseUrl` on the candidate. Personal accounts must use an `https` base URL / proxy on a
+  **public** address (`api/AccountInputs.kt`) — otherwise any user could aim the server at the
+  compose network.
+- **Per-account outbound proxy** (`accounts.proxy_*`, password AES-GCM encrypted, never returned —
+  `hasPassword` only; `null` password in a PATCH keeps it, `""` clears): `HTTP` (CONNECT) or
+  `SOCKS5` (DNS on the proxy). Every upstream call *for* the account uses it — Go datapath and
+  routing (`CandidateDto.proxyUrl` → `egress.Pool`, one cached transport per URL), chat, probe,
+  token refresh, OAuth login (`Http.clientFor`, an OkHttp client per proxy; SOCKS credentials via
+  a process-wide `Authenticator` keyed by proxy host:port). It overrides `ANTHROPIC_PROXY_URL` for
+  that account and **never falls back to direct**: a dead proxy fails the attempt (retryable).
+- **Kotlin rollback datapath parity:** `UpstreamForwarder` honours the account's base URL, auth
+  style and proxy, but of the API-key profiles it only strips the incompatible betas — it does
+  *not* rewrite the system prompt / metadata / user agent the way `apiprofile` does. Rolling the
+  datapath back therefore sends `AGENT_SDK` / `ANTHROPIC_API` keys Claude Code-shaped requests.
 - **Global vs personal accounts:** `accounts.owner_id` = null → **global** (shared pool, the
   Dashboard); non-null → a user's **personal** account. The pool holds both; selection tries a
   user's personal accounts first (own tier), then the global pool (see Rotation). Personal
@@ -161,7 +210,7 @@ Blank/unset is valid: the UI then falls back to the browser's current origin.
   accounts *without* the flag, as long as upstream still reports room (no window `REJECTED`, none
   at utilization 1.0). Dropping that last group outright is what once answered 503 to every
   request while an account still had a fifth of its 5h window; only a genuinely exhausted account
-  leaves selection now, until its window resets. `coefficient` (×1/×5/×20) weights pool capacity. Personal accounts form a
+  leaves selection now, until its window resets. The plan (`kind`) weights pool capacity. Personal accounts form a
   preferred tier ordered ahead of the global tier — unless the user flips
   `users.prefer_global_pool` (self-service toggle on "My Accounts", gated by
   `ACCOUNTS_ORDER_TOGGLE`), which routes through the global pool first and falls back to

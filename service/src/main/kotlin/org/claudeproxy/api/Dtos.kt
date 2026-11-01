@@ -9,14 +9,32 @@ data class LoginRequest(val username: String, val password: String)
 data class CreateAccountRequest(
     val name: String,
     val type: String,               // API_KEY | OAUTH | OAUTH_STATIC
+    val apiKeyMode: String = "CLAUDE_CODE",
     val groupId: Int? = null,
     val priority: Int = 100,
     val threshold: Double = 0.9,
-    val coefficient: Double = 1.0,
+    val kind: String = "NONE",      // AccountKind; ignored for API keys
     val apiKey: String? = null,
     val accessToken: String? = null,
     val refreshToken: String? = null,
     val expiresAt: Long? = null,    // epoch millis
+    // API keys only: custom Anthropic-compatible upstream + X_API_KEY | BEARER
+    val baseUrl: String? = null,
+    val apiAuthStyle: String = "X_API_KEY",
+    val proxy: ProxyInput? = null,
+)
+
+/**
+ * Outbound proxy settings. [password] null keeps the stored one (the UI never receives it back),
+ * "" clears it. `type = NONE` removes the proxy.
+ */
+@Serializable
+data class ProxyInput(
+    val type: String = "NONE",      // NONE | HTTP | SOCKS5
+    val host: String? = null,
+    val port: Int? = null,
+    val username: String? = null,
+    val password: String? = null,
 )
 
 @Serializable
@@ -26,12 +44,18 @@ data class UpdateAccountRequest(
     val clearGroup: Boolean = false,
     val priority: Int? = null,
     val threshold: Double? = null,
-    val coefficient: Double? = null,
+    val kind: String? = null,
     val enabled: Boolean? = null,
     val overThreshold: Boolean? = null,
     val deviceId: String? = null,
     // "" clears; null leaves it alone
     val accountUuid: String? = null,
+    val apiKeyMode: String? = null,
+    // "" clears; null leaves it alone
+    val baseUrl: String? = null,
+    val apiAuthStyle: String? = null,
+    // null leaves the proxy alone
+    val proxy: ProxyInput? = null,
 )
 
 @Serializable
@@ -51,7 +75,8 @@ data class OAuthCompleteRequest(
     val groupId: Int? = null,
     val priority: Int = 100,
     val threshold: Double = 0.9,
-    val coefficient: Double = 1.0,
+    val kind: String = "NONE",
+    val proxy: ProxyInput? = null,
 )
 
 @Serializable
@@ -284,8 +309,6 @@ data class WindowSeriesDto(
     val accountName: String?,
     val fiveHour: List<Double?>,          // 0..1 utilization per bucket (null = no data)
     val weekly: List<Double?>,
-    val fiveHourWeighted: List<Double?>,  // coefficient × utilization (may exceed 1)
-    val weeklyWeighted: List<Double?>,
 )
 
 @Serializable
@@ -293,8 +316,6 @@ data class WindowStatsPayload(
     val buckets: List<String>,                 // time labels, oldest→newest
     val totalFiveHour: List<Double?>,          // Σ raw 5h utilization across accounts (may exceed 1)
     val totalWeekly: List<Double?>,
-    val totalFiveHourWeighted: List<Double?>,  // Σ coefficient × 5h utilization across accounts
-    val totalWeeklyWeighted: List<Double?>,
     val perAccount: List<WindowSeriesDto>,     // empty if the viewer can't see accounts
     val canViewAccounts: Boolean,
 )
@@ -308,11 +329,6 @@ data class WindowDailySeriesDto(
     // utilization gauge itself can never exceed 1.0 because it resets.
     val fiveHour: List<Double>,
     val weekly: List<Double>,
-    // The same 5-hour burn expressed in *base-subscription* windows: each step is scaled by the
-    // account's capacity coefficient, so a ×5 account spending its whole window reads 5.0. Lets a
-    // mixed pool be compared on one scale. No weekly counterpart: the weekly window is the same
-    // size on every plan, so the multiplier does not apply to it.
-    val fiveHourWeighted: List<Double>,
 )
 
 /**
@@ -325,7 +341,6 @@ data class WindowDailyPayload(
     val days: List<String>,
     val totalFiveHour: List<Double>,           // Σ across accounts
     val totalWeekly: List<Double>,
-    val totalFiveHourWeighted: List<Double>,   // Σ across accounts, in base-subscription windows
     val perAccount: List<WindowDailySeriesDto>, // empty if the viewer can't see accounts
     val canViewAccounts: Boolean,
 )

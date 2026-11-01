@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,9 @@ func TestResolveParsesCandidatesAndSendsToken(t *testing.T) {
 		_, _ = io.WriteString(w, `{"userId":7,"overLimit":false,"dailyLimitUsd":25.0,"usedUsd":3.4,
 			"candidates":[{"accountId":12,"type":"OAUTH","deviceId":"dev1",
 			"authHeaders":{"Authorization":"Bearer sk","anthropic-beta":"oauth-2025-04-20"},
-			"fiveHourResetEpoch":1783770000,"weeklyResetEpoch":1784300000}]}`)
+			"fiveHourResetEpoch":1783770000,"weeklyResetEpoch":1784300000},
+			{"accountId":13,"type":"API_KEY","apiKeyMode":"AGENT_SDK","proxyUrl":"socks5h://u:p@10.0.0.1:1080",
+			"baseUrl":"https://other.example/gateway","authHeaders":{"x-api-key":"k"}}]}`)
 	}))
 	defer srv.Close()
 
@@ -40,7 +43,7 @@ func TestResolveParsesCandidatesAndSendsToken(t *testing.T) {
 	if resp.UserID == nil || *resp.UserID != 7 {
 		t.Errorf("UserID = %v", resp.UserID)
 	}
-	if len(resp.Candidates) != 1 {
+	if len(resp.Candidates) != 2 {
 		t.Fatalf("candidates = %d", len(resp.Candidates))
 	}
 	c0 := resp.Candidates[0]
@@ -52,6 +55,33 @@ func TestResolveParsesCandidatesAndSendsToken(t *testing.T) {
 	}
 	if c0.FiveHourResetEpoch != 1783770000 {
 		t.Errorf("fiveHour = %d", c0.FiveHourResetEpoch)
+	}
+	if c0.ProxyURL != "" || c0.BaseURL != "" || c0.APIKeyMode != "" {
+		t.Errorf("absent fields must decode empty: %+v", c0)
+	}
+	c1 := resp.Candidates[1]
+	if c1.APIKeyMode != "AGENT_SDK" || c1.ProxyURL != "socks5h://u:p@10.0.0.1:1080" || c1.BaseURL != "https://other.example/gateway" {
+		t.Errorf("api-key candidate = %+v", c1)
+	}
+}
+
+func TestCandidateUpstreamURL(t *testing.T) {
+	for _, tc := range []struct{ base, want string }{
+		{"", "https://api.anthropic.com/v1/messages?beta=true"},
+		{"https://other.example/gateway", "https://other.example/gateway/v1/messages?beta=true"},
+		{"https://other.example/gateway/", "https://other.example/gateway/v1/messages?beta=true"},
+		{"http://10.0.0.2:8080", "http://10.0.0.2:8080/v1/messages?beta=true"},
+	} {
+		got, err := Candidate{BaseURL: tc.base}.UpstreamURL("https://api.anthropic.com", "/v1/messages?beta=true")
+		if err != nil || got != tc.want {
+			t.Errorf("base %q: %q, %v; want %q", tc.base, got, err, tc.want)
+		}
+	}
+	for _, base := range []string{"other.example", "/gateway", "ftp://other.example", "https://user:secret@other.example",
+		"https://other.example?k=secret", "https://other.example#secret", "https://", "http://other.example/\n"} {
+		if _, err := (Candidate{BaseURL: base}).UpstreamURL("https://api.anthropic.com", "/v1/messages"); err == nil || strings.Contains(err.Error(), "secret") {
+			t.Errorf("base %q: err = %v", base, err)
+		}
 	}
 }
 

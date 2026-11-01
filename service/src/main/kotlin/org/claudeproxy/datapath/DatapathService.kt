@@ -201,9 +201,12 @@ class DatapathService(private val pool: AccountPool) {
     private fun AccountRuntime.toCandidate(): CandidateDto = CandidateDto(
         accountId = id,
         type = type.name,
+        apiKeyMode = apiKeyMode.name,
         deviceId = deviceId,
         accountUuid = accountUuid.takeIf { type != AccountType.API_KEY },
         authHeaders = authHeadersFor(this),
+        baseUrl = upstreamBaseUrl,
+        proxyUrl = proxy?.toUrl(),
         fiveHourResetEpoch = limit.window(WindowKind.FIVE_HOUR)?.resetAt?.epochSecond,
         weeklyResetEpoch = limit.window(WindowKind.WEEKLY)?.resetAt?.epochSecond,
     )
@@ -214,7 +217,9 @@ class DatapathService(private val pool: AccountPool) {
      */
     private fun authHeadersFor(a: AccountRuntime): Map<String, String> = buildMap {
         when (a.type) {
-            AccountType.API_KEY -> a.secret.apiKey?.let { put("x-api-key", it) }
+            AccountType.API_KEY -> a.secret.apiKey?.let {
+                if (a.apiAuthStyle == org.claudeproxy.model.ApiAuthStyle.BEARER) put("Authorization", "Bearer $it") else put("x-api-key", it)
+            }
             AccountType.OAUTH, AccountType.OAUTH_STATIC -> {
                 a.secret.accessToken?.let { put("Authorization", "Bearer $it") }
                 put("anthropic-beta", "oauth-2025-04-20")
