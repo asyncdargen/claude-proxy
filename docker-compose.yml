@@ -1,3 +1,8 @@
+# Production stack. Images are prebuilt and pulled from GHCR (scripts/deploy.sh) — the server
+# builds nothing; the `build:` sections only keep a local `docker compose build` working.
+# Pin a release with CLAUDE_PROXY_TAG in the deploy directory's .env (default: latest).
+# Kept: older Compose v1 reads a file without `version` as the legacy v1 format, and 2.4 is the
+# last format with `depends_on: condition:`.
 version: "2.4"
 
 services:
@@ -18,12 +23,12 @@ services:
       retries: 15
 
   # Kotlin service: management API + datapath + control API. Reachable only on the compose
-  # network (nginx fronts it); no host port. DNS alias on the network is the service key: `service`.
+  # network (web fronts it); no host port. DNS alias on the network is the service key: `service`.
   service:
     build:
       context: .
       dockerfile: deploy/Dockerfile.service
-    image: claude-proxy:latest
+    image: ghcr.io/asyncdargen/claude-proxy-service:${CLAUDE_PROXY_TAG:-latest}
     # Renamed from `claude-proxy` so the new container can run alongside the old one during a
     # zero-downtime cutover (old `claude-proxy` keeps serving :8787 until host-nginx flips).
     container_name: claude-proxy-service
@@ -35,7 +40,7 @@ services:
       - "8787"
     env_file: .env
     environment:
-      # Bind to all interfaces INSIDE the container so nginx can reach it over the network.
+      # Bind to all interfaces INSIDE the container so web (nginx) can reach it over the network.
       BIND_HOST: "0.0.0.0"
       # Public domain — sets publicBaseUrl (token base URL) and the CORS allowHost for the
       # Vite dev origin. The SPA is same-origin in prod (served by nginx), so CORS is moot there.
@@ -64,7 +69,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.gateway
-    image: claude-proxy-gateway:latest
+    image: ghcr.io/asyncdargen/claude-proxy-gateway:${CLAUDE_PROXY_TAG:-latest}
     container_name: claude-proxy-gateway
     restart: unless-stopped
     depends_on:
@@ -95,43 +100,37 @@ services:
       timeout: 3s
       retries: 10
 
-  # Front: serves the React SPA static build (nginx). Internal only — the edge router forwards
-  # `/` here. No API/datapath knowledge; rebuilt whenever the UI changes.
-  front:
+  # Web: the React SPA and the edge router in one nginx (deploy/Dockerfile.web). Serves `/` itself
+  # and fans out /api, /healthz → service and /gateway, /v1, /routing/* → gateway. Published on
+  # localhost:8080 — a host reverse proxy (TLS) proxies here. Container name kept from the old
+  # router so host-side tooling and docs still apply.
+  web:
     build:
       context: .
-      dockerfile: deploy/Dockerfile.front
-    image: claude-proxy-front:latest
-    container_name: claude-proxy-front
+      dockerfile: deploy/Dockerfile.web
+    image: ghcr.io/asyncdargen/claude-proxy-web:${CLAUDE_PROXY_TAG:-latest}
+    container_name: claude-proxy-nginx
     restart: unless-stopped
-    expose:
-      - "8080"
+    # service gates startup (SPA + /api + control plane must be up). The Go gateway only needs to
+    # be STARTED, NOT healthy: a broken data plane must degrade to a 502 on its own routes, never
+    # block the whole edge router (and never block the datapath rollback, which points
+    # DATAPATH_UPSTREAM at service:8787). Upstreams are re-resolved through Docker DNS every 10s,
+    # so recreating a backend no longer needs an nginx reload.
+    depends_on:
+      service:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    environment:
+      SERVICE_UPSTREAM: "service:8787"
+      GATEWAY_UPSTREAM: "gateway:9000"
+      # /gateway/ + /v1/ only. Set DATAPATH_UPSTREAM=service:8787 in .env and recreate web to roll
+      # the datapath back to the Kotlin service; /routing/* stays on the gateway.
+      DATAPATH_UPSTREAM: ${DATAPATH_UPSTREAM:-gateway:9000}
+    ports:
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10
-
-  # Edge router: fans one origin out to front (SPA), service (/api), and the datapath
-  # (/gateway,/v1). Published on localhost:8080 — host nginx + Cloudflare proxy here (TLS at host).
-  nginx:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.nginx
-    image: claude-proxy-nginx:latest
-    container_name: claude-proxy-nginx
-    restart: unless-stopped
-    # service + front gate startup (SPA + /api + control plane must be up). The Go gateway only
-    # needs to be STARTED (so its DNS name resolves for proxy_pass) — NOT healthy: a broken data
-    # plane must degrade to a 502 on its own routes, never block the whole edge router (and never
-    # block the datapath rollback, which just reverts the /gateway,/v1 proxy_pass to service:8787).
-    # nginx re-resolves upstreams on restart if a container's IP changes.
-    depends_on:
-      service:
-        condition: service_healthy
-      front:
-        condition: service_healthy
-      gateway:
-        condition: service_started
-    ports:
-      - "127.0.0.1:8080:8080"

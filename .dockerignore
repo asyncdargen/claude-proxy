@@ -14,3 +14,7 @@ data
 .idea
 pgdata
 .DS_Store
+**/node_modules
+backups
+deploy/compose/.env
+.github

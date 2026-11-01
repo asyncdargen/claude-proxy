@@ -1,26 +1,37 @@
-# Kotlin service (management API + datapath). UI is NOT baked in — nginx serves the SPA.
-# Build context = repo root; sources live under service/.
+# syntax=docker/dockerfile:1
+# Kotlin service (management API + control API + Kotlin datapath). UI is NOT baked in — the web
+# image serves the SPA. Build context = repo root; sources live under service/.
 #
-# ---- Stage 1: build the fat jar ----
-FROM eclipse-temurin:21-jdk AS build
+# ---- Stage 1: build the fat jar (bytecode is arch-independent: build once, on the host's platform) ----
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk AS build
 WORKDIR /app
 COPY service/gradlew service/gradlew.bat ./
 COPY service/gradle ./gradle
 COPY service/settings.gradle.kts service/build.gradle.kts ./
 RUN ./gradlew --version --no-daemon >/dev/null 2>&1 || true
 COPY service/src ./src
-RUN ./gradlew fatJar --no-daemon
+RUN ./gradlew fatJar --no-daemon && cp build/libs/claude-proxy-*-all.jar /app.jar
 
 # ---- Stage 2: slim runtime ----
 FROM eclipse-temurin:21-jre
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="claude-proxy-service" \
+      org.opencontainers.image.description="claude-proxy Kotlin service: management API, control API, Kotlin datapath" \
+      org.opencontainers.image.source="https://github.com/asyncdargen/claude-proxy" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
 WORKDIR /app
-# curl is used by the compose healthcheck.
+# curl is used by the healthcheck.
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /app/build/libs/claude-proxy-*-all.jar app.jar
+COPY --from=build /app.jar app.jar
 ENV BIND_HOST=0.0.0.0 \
     PORT=8787 \
     DB_PATH=/data/claude-proxy.db
 EXPOSE 8787
 VOLUME /data
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=10 \
+    CMD curl -fsS http://127.0.0.1:8787/healthz || exit 1
 ENTRYPOINT ["java", "-jar", "app.jar"]

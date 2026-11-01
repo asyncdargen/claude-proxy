@@ -1,13 +1,29 @@
-# Multi-stage build for the Go gateway (thin Anthropic datapath).
-FROM golang:1.26-alpine AS build
+# syntax=docker/dockerfile:1
+# The Go gateway: the whole data plane (Claude Code datapath + both routing gateways) in one
+# static binary. Build context = repo root. Cross-compiled on the build host — no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /app
 COPY gateway/go.mod gateway/go.sum* ./
 RUN go mod download 2>/dev/null || true
 COPY gateway/ ./
-RUN CGO_ENABLED=0 go build -trimpath -o /gateway .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /gateway .
 
 FROM alpine:3.20
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="claude-proxy-gateway" \
+      org.opencontainers.image.description="claude-proxy Go data plane: Claude Code datapath + OpenAI/Anthropic routing gateways" \
+      org.opencontainers.image.source="https://github.com/asyncdargen/claude-proxy" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+# wget is used by the healthcheck.
 RUN apk add --no-cache ca-certificates wget
 COPY --from=build /gateway /gateway
+ENV PORT=9000
 EXPOSE 9000
+HEALTHCHECK --interval=10s --timeout=3s --retries=10 \
+    CMD wget -q -O /dev/null http://127.0.0.1:9000/healthz || exit 1
 ENTRYPOINT ["/gateway"]

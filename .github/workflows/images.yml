@@ -1,0 +1,74 @@
+# Builds the four claude-proxy images (docker-bake.hcl) for linux/amd64 + linux/arm64 and
+# publishes them to GHCR as ghcr.io/<owner>/claude-proxy[-service|-gateway|-web].
+#   tag push v1.2.3   → :latest, :1.2.3, :sha-<short>
+#   manual run        → :<tag input> (default "edge"), :<version input> if given, :sha-<short>
+name: images
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Moving tag to publish (latest, edge, …)"
+        required: false
+        default: "edge"
+      version:
+        description: "Optional version tag (e.g. 0.2.0-rc1)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tags
+        id: meta
+        # Inputs go through env, never spliced into the script text.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${INPUT_TAG:-edge}" >> "$GITHUB_OUTPUT"
+            echo "version=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "registry=ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # The builder stages run natively (--platform=$BUILDPLATFORM, Go cross-compiles); QEMU is
+      # only for the few RUN steps in the arm64 runtime stages (apt/apk installs).
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/bake-action@v6
+        env:
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REVISION: ${{ github.sha }}
+        with:
+          source: .
+          files: docker-bake.hcl
+          push: true
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max

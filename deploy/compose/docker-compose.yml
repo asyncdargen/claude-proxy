@@ -1,0 +1,96 @@
+# claude-proxy quick start — prebuilt images, nothing to build.
+#   cp .env.example .env   # fill in the secrets (or let scripts/bootstrap.sh do it)
+#   docker compose up -d
+# then open http://127.0.0.1:${HTTP_PORT:-8080}. Put a TLS reverse proxy in front before exposing
+# it (keep it SSE-safe: buffering off, long read timeouts — see docs/DEPLOY.md).
+# Pin a release with CLAUDE_PROXY_TAG=0.2.0 in .env; update with
+#   docker compose pull && docker compose up -d
+name: claude-proxy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: claudeproxy
+      POSTGRES_USER: claudeproxy
+      # Fixed at the first start: changing it later breaks auth against the existing volume.
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claudeproxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  # Kotlin service: management API + control API (+ the Kotlin datapath, kept as a rollback).
+  service:
+    image: ghcr.io/asyncdargen/claude-proxy-service:${CLAUDE_PROXY_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Must bind all interfaces inside the container, or web can't reach it (502).
+      BIND_HOST: "0.0.0.0"
+      PORT: "8787"
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
+      DATABASE_USER: claudeproxy
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 10
+
+  # Go gateway: the Claude Code datapath (/v1) + the OpenAI/Anthropic routing gateways, one port.
+  gateway:
+    image: ghcr.io/asyncdargen/claude-proxy-gateway:${CLAUDE_PROXY_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      service:
+        condition: service_healthy
+    environment:
+      PORT: "9000"
+      SERVICE_URL: "http://service:8787"
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_PROXY_URL: ${ANTHROPIC_PROXY_URL:-}
+      UPSTREAM_STALL_SECONDS: ${UPSTREAM_STALL_SECONDS:-120}
+      EARLY_HEAD_SECONDS: ${EARLY_HEAD_SECONDS:-45}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-sonnet-5}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # nginx: the SPA + the router for /api, /gateway, /v1, /routing/*. The only published port.
+  # Gated on the gateway only being started: a broken data plane degrades to 502 on its own
+  # routes instead of keeping the UI down.
+  web:
+    image: ghcr.io/asyncdargen/claude-proxy-web:${CLAUDE_PROXY_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      service:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    environment:
+      # Datapath rollback: DATAPATH_UPSTREAM=service:8787 sends /gateway + /v1 to the Kotlin
+      # service; /routing/* stays on the gateway.
+      DATAPATH_UPSTREAM: ${DATAPATH_UPSTREAM:-gateway:9000}
+    ports:
+      # Loopback by default — set HTTP_BIND=0.0.0.0 to serve other hosts directly (plain HTTP).
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+
+volumes:
+  pgdata:
+  data:

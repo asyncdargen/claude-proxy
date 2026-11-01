@@ -18,6 +18,56 @@ tokens and their own spend limits.
 > Anthropic access with third parties may conflict with Anthropic's terms — check them before
 > pointing anyone else's client at your instance.
 
+## Quick start (prebuilt images)
+
+Nothing to build — multi-arch (`linux/amd64`, `linux/arm64`) images are published on GHCR.
+You need Docker with the Compose plugin.
+
+**One command** — downloads the compose file into `./claude-proxy`, writes a `.env` with random
+secrets (printing the admin password once) and starts the stack:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/asyncdargen/claude-proxy/master/scripts/bootstrap.sh | bash
+# options: … | bash -s -- --allinone --port 8080 --dir ./claude-proxy
+```
+
+**Or by hand** — the split stack (Postgres + service + gateway + web):
+
+```bash
+mkdir claude-proxy && cd claude-proxy
+base=https://raw.githubusercontent.com/asyncdargen/claude-proxy/master/deploy/compose
+curl -fsSLO $base/docker-compose.yml
+curl -fsSL $base/.env.example -o .env
+# fill in .env: MASTER_KEY, SESSION_SECRET, ADMIN_PASSWORD, DATABASE_PASSWORD, INTERNAL_TOKEN
+#   openssl rand -hex 32     # fine for each of them
+docker compose up -d
+```
+
+…or the **all-in-one** container (Postgres + one image running everything; `INTERNAL_TOKEN` is
+optional there):
+
+```bash
+curl -fsSLO $base/docker-compose.allinone.yml
+docker compose -f docker-compose.allinone.yml up -d
+# or with no Postgres at all (SQLite in a volume):
+docker run -d -p 127.0.0.1:8080:8080 -v claude-proxy-data:/data \
+  -e MASTER_KEY=$(openssl rand -hex 32) -e ADMIN_PASSWORD=change-me ghcr.io/asyncdargen/claude-proxy
+```
+
+Open <http://127.0.0.1:8080> and sign in with `ADMIN_USER` / `ADMIN_PASSWORD`. The port is bound
+to loopback; `HTTP_PORT` / `HTTP_BIND` in `.env` change that — but put a TLS reverse proxy in front
+before exposing it (see [`docs/DEPLOY.md`](docs/DEPLOY.md)).
+
+| Image | Contents |
+|-------|----------|
+| `ghcr.io/asyncdargen/claude-proxy-service` | Kotlin service — management API, control API, Kotlin datapath |
+| `ghcr.io/asyncdargen/claude-proxy-gateway` | Go data plane — Claude Code datapath + OpenAI/Anthropic routing |
+| `ghcr.io/asyncdargen/claude-proxy-web` | nginx — the web UI and the router in front of the other two |
+| `ghcr.io/asyncdargen/claude-proxy` | all-in-one: the three above in one container |
+
+**Pin a version:** set `CLAUDE_PROXY_TAG=0.2.0` in `.env` (default `latest`; every commit is also
+published as `sha-<short>`). **Update:** `docker compose pull && docker compose up -d`.
+
 ## Features
 
 **Routing & limits**
@@ -26,7 +76,14 @@ tokens and their own spend limits.
   whole pool is saturated.
 - **Live window tracking** from Anthropic's `anthropic-ratelimit-unified-{5h,7d}-utilization`
   response headers, plus a background prober that keeps window state fresh while idle.
-- **Capacity coefficients** (×1 / ×5 / ×20) so a Max plan weighs correctly in pool capacity.
+- **Account plans** (Pro / Max / Ultra) weight pool headroom; verified Ultra accounts, which have
+  no 5-hour window, are detected from the response headers and shown weekly-only.
+- **API keys and foreign upstreams** — an API-key account can target any Anthropic-compatible base
+  URL (another claude-proxy, a corporate gateway) with `x-api-key` or bearer auth, and present
+  requests as Claude Code, the Agent SDK or a plain API call. Keys have no windows or thresholds;
+  they are health-checked for free via `/v1/models`.
+- **Per-account outbound proxy** — HTTP (CONNECT) or SOCKS5 with credentials, used for every call
+  made for that account (inference, chat, probes, token refresh), never falling back to direct.
 - **Transparent retry across accounts** on `429/401/5xx`; hard-limited accounts are parked until
   their window resets.
 - **Mid-stream failover** — Anthropic can return `overloaded_error` *after* a `200`. If nothing
@@ -64,11 +121,11 @@ tokens and their own spend limits.
 
 ## Architecture
 
-One nginx router fronts every component on a single origin:
+One nginx — the **web** image, which also serves the SPA — fronts every component on a single origin:
 
 | Public path            | Component                  | What it is |
 |------------------------|----------------------------|------------|
-| `/`                    | **frontend**               | React SPA (admin UI), static |
+| `/`                    | **web** (nginx)            | React SPA (admin UI + chat), static |
 | `/api/…`               | **service** (Kotlin/Ktor)  | Management REST API |
 | `/gateway/…`           | **gateway** (Go)           | The Claude Code datapath |
 | `/routing/openai/…`    | **gateway** (same container) | OpenAI Chat Completions over your pool |
@@ -77,11 +134,12 @@ One nginx router fronts every component on a single origin:
 The Go gateways are a stateless data plane: they resolve each request against the service's
 private `/internal/*` control API (which owns selection, crypto and bookkeeping), forward to
 Anthropic, relay SSE, and report usage back. They never touch the database. The Kotlin service
-also still contains a complete datapath, kept as an instant rollback target — flipping one nginx
-`proxy_pass` reverts to it.
+also still contains a complete datapath, kept as an instant rollback target — setting
+`DATAPATH_UPSTREAM=service:8787` on the web container reverts to it.
 
 Layout: `frontend/` (React) · `service/` (Kotlin) · `gateway/` (Go — one module, one binary,
-all three paths on one port) · `deploy/` (nginx config + Dockerfiles) · `docs/`.
+all three paths on one port) · `deploy/` (Dockerfiles, the web image's nginx config, quick-start
+compose files) · `scripts/` (release, deploy, rollback, bootstrap) · `docs/`.
 
 Depth: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -96,17 +154,19 @@ charts, no UI framework) · Docker Compose.
 - Docker + Docker Compose — for the full stack.
 - To run pieces natively: JDK 21+, Go 1.23+, Node 18+ with `pnpm`.
 
-## Quick start
+## First steps
+
+Once it is up (see [Quick start](#quick-start-prebuilt-images)), sign in and add an account
+(**Dashboard → Add account**, or *Login with Claude*), then create a token.
+
+To run the stack from a checkout instead, the root `docker-compose.yml` (the production shape:
+fixed container names, `./pgdata` bind mount) pulls the same images, or builds them locally:
 
 ```bash
-cp .env.example .env
-# edit .env — MASTER_KEY, SESSION_SECRET, ADMIN_PASSWORD, DATABASE_PASSWORD, INTERNAL_TOKEN
-#   openssl rand -hex 32     # fine for each of them
-docker-compose up -d --build
+cp .env.example .env      # edit the secrets as above
+docker compose build      # optional — otherwise `up` pulls the published images
+docker compose up -d
 ```
-
-Open <http://127.0.0.1:8080> and sign in with `ADMIN_USER` / `ADMIN_PASSWORD`. Add an account
-(**Dashboard → Add account**, or *Login with Claude*), then create a token.
 
 ### Point Claude Code at it
 
@@ -159,12 +219,35 @@ cd service && ./gradlew test
 cd gateway && go test ./... && go vet ./...
 ```
 
+### Building and releasing images
+
+All four images are defined in [`docker-bake.hcl`](docker-bake.hcl) (Dockerfiles in `deploy/`).
+Builder stages run on the build host's platform — the jar and the SPA are platform-neutral and Go
+cross-compiles — so a multi-arch build needs emulation only for the small runtime `RUN` steps.
+
+```bash
+docker buildx bake -f docker-bake.hcl --print                 # resolved definition
+scripts/release-images.sh --load                              # native-arch build into the local docker
+scripts/release-images.sh --load --platform linux/amd64 web   # one image, one platform
+scripts/release-images.sh                                     # amd64+arm64, push :latest :<version> :sha-<short>
+```
+
+`release-images.sh` takes the version from `service/build.gradle.kts` (override with `VERSION=`),
+the revision from git, and creates a `docker-container` buildx builder (`claude-proxy-builder`)
+when it is missing; pushing needs `docker login ghcr.io`. `REGISTRY=ghcr.io/you` publishes under
+another owner. In CI, pushing a `v*` tag runs [`.github/workflows/images.yml`](.github/workflows/images.yml),
+which publishes `:latest`, `:<version>` and `:sha-<short>`; a manual run publishes `:edge` (or the
+tag you give it).
+
 ## Deployment
 
-A Compose stack on one host behind a TLS-terminating reverse proxy. Set `BIND_HOST=0.0.0.0`,
-strong `MASTER_KEY` / `SESSION_SECRET` / `INTERNAL_TOKEN`, and `PUBLIC_DOMAIN`. Full runbook,
-safety rules (the deploy directory holds the bind-mounted database — never `rsync --delete` into
-it) and a troubleshooting table: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+A Compose stack on one host behind a TLS-terminating reverse proxy, running the published images
+— the server builds nothing. Set strong `MASTER_KEY` / `SESSION_SECRET` / `INTERNAL_TOKEN`, and
+`PUBLIC_DOMAIN`. `DEPLOY_HOST=root@YOUR_SERVER scripts/deploy.sh` snapshots the running images and
+the database, copies `docker-compose.yml`, pulls and recreates service → gateway → web one at a
+time; `scripts/rollback.sh` puts the snapshot back. Full runbook, safety rules (the deploy
+directory holds the bind-mounted database — never `rsync --delete` into it) and a troubleshooting
+table: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Configuration
 

@@ -1,7 +1,0 @@
-# Edge router image: reverse-proxies one origin to the components. Serves NO static itself —
-# the SPA lives in the `front` container (deploy/Dockerfile.front); `/` proxies there.
-# Build context = repo root (needs deploy/nginx/).
-FROM nginx:alpine
-COPY deploy/nginx/nginx.conf /etc/nginx/conf.d/default.conf
-COPY deploy/nginx/proxy_common.conf deploy/nginx/proxy_stream.conf /etc/nginx/
-EXPOSE 8080

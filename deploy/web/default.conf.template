@@ -1,0 +1,115 @@
+# claude-proxy web — the SPA and the edge router in one nginx (no TLS: a host proxy / CDN
+# terminates TLS and proxies here). Serves the React build itself and fans the rest out:
+#   /                    → the SPA static build (served from this image)
+#   /api, /healthz       → the Kotlin service (management API)
+#   /gateway, /v1        → the Anthropic datapath (the Go gateway; the service is the rollback)
+#   /routing/openai|anthropic → the API routing gateways — same Go container, split by path
+#
+# This is an envsubst template (nginx image: /etc/nginx/templates → conf.d at start; the
+# all-in-one image renders it in its entrypoint). Only these are substituted:
+#   SERVICE_UPSTREAM  (default service:8787)   — /api, /healthz, /gateway/v1/usage
+#   GATEWAY_UPSTREAM  (default gateway:9000)   — /routing/*
+#   DATAPATH_UPSTREAM (default GATEWAY_UPSTREAM) — /gateway/, /v1/
+#   RESOLVER          (default 127.0.0.11, Docker's embedded DNS)
+#
+# Upstreams are held in variables, which makes nginx resolve them per request (cached `valid=`)
+# instead of once at startup. Before this, recreating a backend container gave it a new IP and
+# nginx kept proxying to the old one — a 502 until someone ran `nginx -s reload`. The price is
+# that proxy_pass with a variable never rewrites the URI, so the one location that strips a
+# prefix (/gateway/) does it with an explicit `rewrite … break`.
+resolver ${RESOLVER} valid=10s ipv6=off;
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+
+    set $service_upstream  ${SERVICE_UPSTREAM};
+    set $gateway_upstream  ${GATEWAY_UPSTREAM};
+    set $datapath_upstream ${DATAPATH_UPSTREAM};
+
+    # Match the service's raised Netty limits (large Claude Code headers) + large bodies.
+    large_client_header_buffers 8 128k;
+    client_max_body_size 100m;
+
+    # ---- Management API + health → service ----
+    # The whole chat API needs the datapath's unbuffered, long-timeout settings, not just the
+    # message stream: with buffering on nginx withholds the head while the model thinks, and the
+    # 60s default read timeout kills the slow operations outright — compacting a conversation is
+    # a full model call over its entire transcript, and the client then gets an HTML 504 where it
+    # expected JSON. Uploads and share-link imports sit on the same prefix and want the same.
+    location /api/chat/ {
+        proxy_pass http://$service_upstream;
+        include /etc/nginx/proxy_stream.conf;
+    }
+    location /api/ {
+        proxy_pass http://$service_upstream;
+        include /etc/nginx/proxy_common.conf;
+    }
+    location = /healthz {
+        proxy_pass http://$service_upstream;
+        include /etc/nginx/proxy_common.conf;
+    }
+
+    # ---- Anthropic datapath (proxy) → Go gateway (Spec B) ----
+    # The /gateway prefix is stripped so the backend sees /v1/... . The Kotlin datapath
+    # (service:8787) is kept running as an instant rollback — set DATAPATH_UPSTREAM=service:8787
+    # and recreate this container to fall back; /routing/* keeps going to the gateway. Compose
+    # gates this container on the Go gateway only with `service_started` (not healthy), so a
+    # broken gateway module never blocks this rollback or the rest of the edge router.
+    # Read-only user-token quota snapshot is served by the management service.
+    location = /gateway/v1/usage {
+        if ($request_method != GET) { return 405; }
+        proxy_pass http://$service_upstream;
+        include /etc/nginx/proxy_common.conf;
+    }
+    location /gateway/ {
+        rewrite ^/gateway/(.*)$ /$1 break;
+        proxy_pass http://$datapath_upstream;
+        include /etc/nginx/proxy_stream.conf;
+    }
+    # Legacy direct /v1 (tokens whose base URL is the bare domain) → same backend, path kept.
+    location /v1/ {
+        proxy_pass http://$datapath_upstream;
+        include /etc/nginx/proxy_stream.conf;
+    }
+
+    # ---- API routing gateways (OpenAI/Anthropic emulation over Claude Code subscriptions) ----
+    # Same container as the datapath: one Go binary mounts all three on one port, split by path.
+    # These proxy_pass targets carry NO URI part on purpose, so the prefix reaches the gateway and
+    # it strips the prefix itself to pick the translator — that is what tells the three apart on a
+    # shared listener. Stripping it here would send every routing request to the Claude Code
+    # datapath.
+    #   base_url https://<host>/routing/openai/v1  → /v1/chat/completions
+    #   base_url https://<host>/routing/anthropic   → /v1/messages
+    # Both stream SSE, so they use the same SSE-safe settings as the datapath.
+    location /routing/openai/ {
+        proxy_pass http://$gateway_upstream;
+        include /etc/nginx/proxy_stream.conf;
+    }
+    location /routing/anthropic/ {
+        proxy_pass http://$gateway_upstream;
+        include /etc/nginx/proxy_stream.conf;
+    }
+
+    # ---- SPA (React build baked into this image) ----
+    # Hashed build assets are immutable — cache them hard.
+    location /assets/ {
+        include /etc/nginx/spa_gzip.conf;
+        try_files $uri =404;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # SPA client-side routing: every unknown path returns index.html (react-router resolves it).
+    location / {
+        include /etc/nginx/spa_gzip.conf;
+        try_files $uri /index.html;
+    }
+
+    # index.html itself must never be cached, or a deploy won't reach clients.
+    location = /index.html {
+        include /etc/nginx/spa_gzip.conf;
+        add_header Cache-Control "no-store";
+    }
+}

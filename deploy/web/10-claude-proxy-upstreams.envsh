@@ -1,0 +1,9 @@
+#!/bin/sh
+# Sourced by the nginx image entrypoint before the templates are rendered (the all-in-one
+# entrypoint sources it too). Gives the upstream variables their defaults: envsubst can't, and
+# DATAPATH_UPSTREAM has to follow GATEWAY_UPSTREAM unless set on its own — that split is what lets
+# the datapath roll back to the Kotlin service without taking /routing/* with it.
+export SERVICE_UPSTREAM="${SERVICE_UPSTREAM:-service:8787}"
+export GATEWAY_UPSTREAM="${GATEWAY_UPSTREAM:-gateway:9000}"
+export DATAPATH_UPSTREAM="${DATAPATH_UPSTREAM:-$GATEWAY_UPSTREAM}"
+export RESOLVER="${RESOLVER:-127.0.0.11}"

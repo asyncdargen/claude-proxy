@@ -1,0 +1,44 @@
+# claude-proxy quick start, all-in-one: Postgres + one container running service, gateway and
+# the web UI. Same .env as docker-compose.yml (INTERNAL_TOKEN is optional here — the container
+# generates one when unset). For SQLite instead of Postgres, drop the postgres service and the
+# DATABASE_* lines: the database then lives in the `data` volume (/data).
+#   docker compose -f docker-compose.allinone.yml up -d
+name: claude-proxy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: claudeproxy
+      POSTGRES_USER: claudeproxy
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claudeproxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  claude-proxy:
+    image: ghcr.io/asyncdargen/claude-proxy:${CLAUDE_PROXY_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/claudeproxy
+      DATABASE_USER: claudeproxy
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+    volumes:
+      - data:/data
+    ports:
+      # Loopback by default — set HTTP_BIND=0.0.0.0 to serve other hosts directly (plain HTTP).
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+
+volumes:
+  pgdata:
+  data:
