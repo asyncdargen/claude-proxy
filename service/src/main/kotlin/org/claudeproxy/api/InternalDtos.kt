@@ -77,6 +77,9 @@ data class ResolveResponse(
  */
 @Serializable
 data class UsageReport(
+    // per-report id from the gateway; a report seen before is acknowledged without recording,
+    // so a retried report (the first answer was slow, not lost) cannot bill a request twice
+    val reportId: String? = null,
     val accountId: Int,
     val userId: Int? = null,
     // inbound token that authenticated the request, from the resolve response.

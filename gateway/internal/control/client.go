@@ -82,13 +82,16 @@ type ResolveResp struct {
 
 // UsageReport is one upstream attempt's outcome, posted to /internal/usage.
 type UsageReport struct {
-	AccountID  int   `json:"accountId"`
-	UserID     *int  `json:"userId"`
-	TokenID    *int  `json:"tokenId,omitempty"`
-	Input      int64 `json:"input"`
-	Output     int64 `json:"output"`
-	CacheRead  int64 `json:"cacheRead"`
-	CacheWrite int64 `json:"cacheWrite"`
+	// ReportID makes a report idempotent: the service records each id once, so a retry after a
+	// slow response can no longer bill the same request twice (it did — ~3% of rows, 3 s apart).
+	ReportID   string `json:"reportId,omitempty"`
+	AccountID  int    `json:"accountId"`
+	UserID     *int   `json:"userId"`
+	TokenID    *int   `json:"tokenId,omitempty"`
+	Input      int64  `json:"input"`
+	Output     int64  `json:"output"`
+	CacheRead  int64  `json:"cacheRead"`
+	CacheWrite int64  `json:"cacheWrite"`
 	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite, priced at 2× input instead of 1.25×.
 	CacheWrite1h int64 `json:"cacheWrite1h,omitempty"`
 	// Server-side tool calls Anthropic bills per invocation (web search) — token counts alone
@@ -251,10 +254,18 @@ func (c *Client) ReportUsage(ctx context.Context, r UsageReport) {
 	if r.Source == "" {
 		r.Source = c.source
 	}
+	if r.ReportID == "" {
+		r.ReportID = newReportID()
+	}
 	body, _ := json.Marshal(r)
 	go func() {
 		for attempt := 0; attempt < 3; attempt++ {
-			rc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+			// Generous: with the report id a retry is harmless, but an attempt cut short while the
+			// service is still writing just turns into another round trip.
+			rc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			req, err := http.NewRequestWithContext(rc, http.MethodPost, c.serviceURL+"/internal/usage", bytes.NewReader(body))
 			if err != nil {
 				cancel()
@@ -274,4 +285,11 @@ func (c *Client) ReportUsage(ctx context.Context, r UsageReport) {
 		}
 		log.Printf("control: usage report dropped after retries (acct#%d status=%d)", r.AccountID, r.Status)
 	}()
+}
+
+// newReportID is a random 128-bit hex id for one usage report.
+func newReportID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

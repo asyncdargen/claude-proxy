@@ -151,6 +151,24 @@ class DatapathService(private val pool: AccountPool) {
      * and run the per-status account bookkeeping that `UpstreamForwarder` did inline.
      */
     suspend fun applyOutcome(o: UsageReport) {
+        // Phase timings, logged only when the whole thing is slow: the gateway gives a report a
+        // bounded wait, and a slow answer used to turn into a duplicate row.
+        val t0 = System.nanoTime()
+        val marks = ArrayList<Pair<String, Long>>(4)
+        fun mark(phase: String) { marks += phase to System.nanoTime() }
+        try {
+            applyOutcomeTimed(o, ::mark)
+        } finally {
+            val total = (System.nanoTime() - t0) / 1_000_000
+            if (total > 1000) {
+                var prev = t0
+                val phases = marks.joinToString(" ") { (n, t) -> "$n=${(t - prev) / 1_000_000}ms".also { prev = t } }
+                log.warn("slow usage report acct#{} status={} took {}ms: {}", o.accountId, o.status, total, phases)
+            }
+        }
+    }
+
+    private suspend fun applyOutcomeTimed(o: UsageReport, mark: (String) -> Unit) {
         // Datapath tag as reported: "proxy" (Claude Code), "routing" (API gateways) or "chat"
         // (the built-in UI). Each meters its own daily limit, so the tag has to survive verbatim.
         val source = o.source.ifBlank { "proxy" }
@@ -163,7 +181,9 @@ class DatapathService(private val pool: AccountPool) {
         val cost = if (silent) 0.0 else {
             UsageRepo.record(o.accountId, o.userId, billed, o.status, o.model, source, o.tokenId, o.webFetchRequests)
         }
+        mark("record")
         if (o.mcpCalls.isNotEmpty()) McpUsageRepo.record(o.userId, o.tokenId, o.mcpCalls)
+        mark("mcp")
 
         // Keep the cached daily spend fresh. Only *global* (shared-pool) usage counts toward the
         // per-user daily limit; personal accounts are the user's own quota (exempt). Proxy and
@@ -180,6 +200,7 @@ class DatapathService(private val pool: AccountPool) {
         val prev = pool.get(o.accountId)?.limit ?: LimitState()
         val newLimit = RateLimitHeaders.parse(headers, prev)
         pool.updateLimit(o.accountId, newLimit)
+        mark("limits")
 
         when {
             o.status == 429 -> {

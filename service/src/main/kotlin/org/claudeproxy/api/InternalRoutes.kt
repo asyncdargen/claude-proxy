@@ -57,6 +57,9 @@ fun Route.internalRoutes(datapath: DatapathService, internalToken: String?) {
         post("/usage") {
             if (!call.authorized()) return@post call.respond(HttpStatusCode.Unauthorized)
             val report = call.receive<UsageReport>()
+            if (!org.claudeproxy.datapath.ReportDedup.firstSighting(report.reportId)) {
+                return@post call.respond(HttpStatusCode.NoContent)
+            }
             datapath.applyOutcome(report)
             call.respond(HttpStatusCode.NoContent)
         }
