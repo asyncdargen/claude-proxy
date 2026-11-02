@@ -108,9 +108,13 @@ private fun requirePublicHost(host: String, what: String) {
     val addrs = try { InetAddress.getAllByName(host.removePrefix("[").removeSuffix("]")) } catch (_: Exception) {
         throw InputError("$what does not resolve")
     }
-    val internal = addrs.any {
-        it.isLoopbackAddress || it.isSiteLocalAddress || it.isLinkLocalAddress || it.isAnyLocalAddress ||
-            it.isMulticastAddress || (it is java.net.Inet6Address && (it.address[0].toInt() and 0xfe) == 0xfc)
-    }
-    if (internal) throw InputError("$what must be a public address")
+    if (addrs.any(::isInternalAddress)) throw InputError("$what must be a public address")
+}
+
+/** Loopback, private, link-local, wildcard, multicast, ULA, and CGNAT 100.64.0.0/10 (Tailscale/carrier). */
+internal fun isInternalAddress(addr: InetAddress): Boolean {
+    val b = addr.address
+    val cgnat = addr is java.net.Inet4Address && (b[0].toInt() and 0xff) == 100 && (b[1].toInt() and 0xc0) == 64
+    return addr.isLoopbackAddress || addr.isSiteLocalAddress || addr.isLinkLocalAddress || addr.isAnyLocalAddress ||
+        addr.isMulticastAddress || cgnat || (addr is java.net.Inet6Address && (b[0].toInt() and 0xfe) == 0xfc)
 }
