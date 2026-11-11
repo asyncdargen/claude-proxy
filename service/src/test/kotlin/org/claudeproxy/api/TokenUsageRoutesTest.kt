@@ -18,6 +18,7 @@ import org.claudeproxy.datapath.DatapathService
 import org.claudeproxy.db.*
 import org.claudeproxy.model.*
 import org.claudeproxy.repo.*
+import org.jetbrains.exposed.sql.insert
 import java.io.File
 import java.time.Instant
 import kotlin.test.*
@@ -27,6 +28,10 @@ class TokenUsageRoutesTest {
     private lateinit var pool: AccountPool
     private var user = 0
     private var own = 0
+    private var bob = 0
+    private var shared = 0
+    private var bobOwn = 0
+    private var forbidden = 0
     private lateinit var token: String
     private lateinit var routingToken: String
 
@@ -39,12 +44,13 @@ class TokenUsageRoutesTest {
             upstreamBaseUrl="https://example.invalid", publicBaseUrl="", databaseUrl="",
             databaseUser="", databasePassword="", internalToken=null))
         MemoryCache.clear()
+        TokenAttributionCache.clear()
         user = UserRepo.create("alice", "pw", listOf("user"), emptyList(), null)
-        val bob = UserRepo.create("bob", "pw", listOf("user"), emptyList(), null)
+        bob = UserRepo.create("bob", "pw", listOf("user"), emptyList(), null)
         own = account("alice-private-name", user)
-        account("bob-private-name", bob)
-        account("shared-private-name", null)
-        account("forbidden-group", null, GroupRepo.create("secret-group"))
+        bobOwn = account("bob-private-name", bob)
+        shared = account("shared-private-name", null)
+        forbidden = account("forbidden-group", null, GroupRepo.create("secret-group"))
         pool = AccountPool()
         runBlocking {
             pool.reload()
@@ -80,6 +86,69 @@ class TokenUsageRoutesTest {
         assertEquals(42.0,body["rate_limits"]!!.jsonObject["five_hour"]!!.jsonObject["used_percentage"]!!.jsonPrimitive.double)
         for (secret in listOf("alice-private-name","bob-private-name","shared-private-name","forbidden-group","upstream-secret","refresh-secret",token,"authHeaders","deviceId")) assertFalse(text.contains(secret),secret)
         assertEquals(0L,UsageRepo.userTotals(user,UserRepo.startOfUtcDay()).requests)
+    }
+    @Test fun `attribution detail names scoped accounts and splits the current window by user`() = testApplication {
+        application { mount() }
+        val t = Instant.now().minusSeconds(600)
+        val carol = UserRepo.create("carol", "pw", listOf("user"), emptyList(), null)
+        org.jetbrains.exposed.sql.transactions.transaction {
+            // out of alice's scope: another user's personal account and a group she is not in
+            for (hidden in listOf(bobOwn, forbidden)) {
+                for ((seconds, util) in listOf(0L to 0.1, 60L to 0.5)) WindowSnapshots.insert {
+                    it[accountId] = hidden; it[windowKind] = "5h"; it[ts] = t.plusSeconds(seconds); it[utilization] = util
+                }
+                UsageEvents.insert {
+                    it[accountId] = hidden; it[userId] = carol; it[ts] = t.plusSeconds(30); it[cost] = 2.0; it[inputTokens] = 20
+                }
+            }
+            for ((seconds, util) in listOf(0L to 0.2, 60L to 0.6, 120L to 0.8)) WindowSnapshots.insert {
+                it[accountId] = shared; it[windowKind] = "5h"; it[ts] = t.plusSeconds(seconds); it[utilization] = util
+            }
+            for ((seconds, who, spent) in listOf(Triple(20L, user, 1.0), Triple(40L, bob, 3.0), Triple(90L, user, 1.0))) UsageEvents.insert {
+                it[accountId] = shared; it[userId] = who; it[ts] = t.plusSeconds(seconds); it[cost] = spent
+                it[inputTokens] = 20
+            }
+        }
+        suspend fun fetch(detail: String) = Json.parseToJsonElement(
+            client.get("/gateway/v1/usage?attribution=$detail") { header("Authorization", "Bearer $token") }.bodyAsText()).jsonObject
+        val text = client.get("/gateway/v1/usage?attribution=full") { header("Authorization", "Bearer $token") }.bodyAsText()
+        for (hidden in listOf("bob-private-name", "forbidden-group", "carol", "upstream-secret", "refresh-secret", token, "accountId", "userId")) assertFalse(text.contains(hidden), hidden)
+        val accounts = fetch("full")["accounts"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("alice-private-name", "shared-private-name"), accounts.map { it["name"]!!.jsonPrimitive.content })
+        // a personal account has one spender, so nothing is attributed
+        assertNull(accounts[0]["attribution"])
+        val window = accounts[1]["attribution"]!!.jsonObject["five_hour"]!!.jsonObject
+        assertEquals(JsonNull, accounts[1]["attribution"]!!.jsonObject["seven_day"])
+        assertEquals(80.0, window["total_percentage"]!!.jsonPrimitive.double, 1e-9)
+        // 20% was read before any request; alice 0.4 * 1/4 + 0.2, bob 0.4 * 3/4
+        assertEquals(30.0, window["mine_percentage"]!!.jsonPrimitive.double, 1e-9)
+        val people = window["contributors"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("alice" to true, "bob" to false, "Unattributed" to false).toSet(),
+            people.map { it["username"]!!.jsonPrimitive.content to it["me"]!!.jsonPrimitive.boolean }.toSet())
+        val points = window["points"]!!.jsonArray
+        assertEquals(3, points.size)
+        assertEquals(30.0, points.last().jsonObject["values"]!!.jsonObject["bob"]!!.jsonPrimitive.double, 1e-9)
+        val summary = fetch("summary")["accounts"]!!.jsonArray[1].jsonObject["attribution"]!!.jsonObject["five_hour"]!!.jsonObject
+        assertNull(summary["points"])
+        assertEquals(30.0, summary["mine_percentage"]!!.jsonPrimitive.double, 1e-9)
+        // without the parameter the entries keep their exact keys
+        for (plain in listOf(fetch("bogus"), Json.parseToJsonElement(
+            client.get("/gateway/v1/usage") { header("Authorization", "Bearer $token") }.bodyAsText()).jsonObject)) {
+            assertEquals(setOf("scope", "available", "rate_limits"), plain["accounts"]!!.jsonArray[1].jsonObject.keys)
+        }
+    }
+    @Test fun `attribution is computed once per interval and its failure keeps the quota snapshot`() = testApplication {
+        application { mount() }
+        var loads = 0
+        TokenAttributionCache.load = { loads++; throw IllegalStateException("db busy") }
+        repeat(2) {
+            val response = client.get("/gateway/v1/usage?attribution=summary") { header("Authorization", "Bearer $token") }
+            assertEquals(HttpStatusCode.OK, response.status)
+            val entry = Json.parseToJsonElement(response.bodyAsText()).jsonObject["accounts"]!!.jsonArray[1].jsonObject
+            assertEquals("shared-private-name", entry["name"]!!.jsonPrimitive.content)
+            assertNull(entry["attribution"])
+        }
+        assertEquals(1, loads)
     }
     @Test fun `routing keys work and disabled users and revoked tokens fail immediately`() = testApplication {
         application { mount() }
