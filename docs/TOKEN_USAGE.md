@@ -25,6 +25,27 @@ record usage or mark an active session. Responses use `Cache-Control: no-store`.
   null when unlimited), `exhausted`, and next UTC-day `resets_at`. Reaching the
   shared cap does not disable the caller's personal accounts.
 
+## Per-user attribution (opt-in)
+
+`GET /gateway/v1/usage?attribution=summary` (or `full`) adds two fields to each entry of
+`accounts`; any other value, or no parameter, leaves the response as described above.
+
+- `name`: the account's display name.
+- `attribution`: absent for personal accounts and API keys, otherwise `five_hour` and
+  `seven_day`, each null without a known current period. A window holds `started_at`,
+  `resets_at`, `observed_at` (Unix seconds), `partial` (the period's beginning was not
+  observed), `total_percentage`, `mine_percentage` (the caller's part of the total) and
+  `contributors`: `username`, `percentage`, `me`, largest first. `full` adds `points`
+  (at most 200): `ts`, `total` and `values` by username, for a stacked chart.
+
+These are the estimates of the management window-attribution statistics, in percent of the
+quota. Usernames of everyone who spent an account's window are visible to every token holder
+whose scope includes that account; no user or account IDs are returned. The computation is
+shared between callers and cached for 60 seconds; a caller never waits for another caller's
+refresh, and a failed computation omits `attribution` instead of failing the snapshot. Both
+fields are absent, not null, without the parameter. An account that changed owner or group
+keeps showing the users of its current periods (up to a week) to its new scope.
+
 Windows `five_hour` / `seven_day` are null when unknown. A known window contains
 `used_percentage` (used, not remaining), `resets_at`, `updated_at` (Unix seconds)
 and `stale`. Missing/35-minute-old observations and passed reset times are stale;
