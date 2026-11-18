@@ -281,7 +281,11 @@ object UsageEvents : Table("usage_events") {
     val tokenId = integer("token_id").nullable()
     override val primaryKey = PrimaryKey(id)
     // Range reads per account (window attribution).
-    init { index(false, accountId, ts) }
+    init {
+        index(false, accountId, ts)
+        // Per-user reads: the daily-limit check on every request and each user's stats.
+        index(false, userId, ts)
+    }
 }
 
 /**
