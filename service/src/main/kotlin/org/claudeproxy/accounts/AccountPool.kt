@@ -58,7 +58,7 @@ class AccountPool {
      * hard-limited/out-of-scope accounts.
      */
     suspend fun selectionOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now()): List<AccountRuntime> =
-        mutex.withLock { orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now) }
+        mutex.withLock { orderedCandidates(userId, allowedGroups, personalFirst, allowGlobal, now).markingActive() }
 
     /**
      * Personal-accounts-only selection order. Used when the shared-pool daily spend limit is
@@ -67,7 +67,12 @@ class AccountPool {
     suspend fun selectionOrderOwned(userId: Int, now: Instant = Instant.now()): List<AccountRuntime> = mutex.withLock {
         tierOrder(accounts.values.filter {
             it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) && it.ownerId == userId
-        }, SelectionStrategy.current(), now)
+        }, SelectionStrategy.current(), now).markingActive()
+    }
+
+    /** The head of a real routing order is the account the request goes to; quota-free calls never write this. */
+    private fun List<AccountRuntime>.markingActive(): List<AccountRuntime> = also { order ->
+        order.firstOrNull()?.let { activeAccountId = it.id }
     }
 
     fun markActive(id: Int) { activeAccountId = id }
@@ -93,7 +98,7 @@ class AccountPool {
         val byPriority = compareBy<AccountRuntime>({ it.priority }, { it.id })
         val ordered = if (personalFirst) personal.sortedWith(byPriority) + global.sortedWith(byPriority)
         else global.sortedWith(byPriority) + personal.sortedWith(byPriority)
-        ordered.also { list -> list.firstOrNull()?.let { activeAccountId = it.id } }
+        ordered
     }
 
     /** Why the pool couldn't serve, for choosing a client-facing status. */
