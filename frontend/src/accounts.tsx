@@ -28,6 +28,25 @@ export const personalAccountApi: AccountApi = {
 
 export type Scope = 'global' | 'personal';
 
+const SHARE_HOURS = [{ h: 4, label: '4 h' }, { h: 24, label: '24 h' }, { h: 168, label: '7 days' }, { h: 336, label: '14 days' }];
+
+/** Lend a personal account to the shared pool for a while, or take it back. */
+export function ShareControl({ a, onShare }: { a: AccountDto; onShare: (until: string | null) => void }) {
+  const [hours, setHours] = useState(4);
+  const until = a.sharedUntil && new Date(a.sharedUntil) > new Date() ? new Date(a.sharedUntil) : null;
+  if (until) {
+    return <button className="sm ghost" title={`Shared with the pool until ${until.toLocaleString()}`} onClick={() => onShare(null)}>Stop sharing</button>;
+  }
+  return (
+    <>
+      <select value={hours} onChange={(e) => setHours(+e.target.value)} title="How long to share this account with the pool">
+        {SHARE_HOURS.map((o) => <option key={o.h} value={o.h}>{o.label}</option>)}
+      </select>
+      <button className="sm ghost" onClick={() => onShare(new Date(Date.now() + hours * 3600_000).toISOString())}>Share</button>
+    </>
+  );
+}
+
 /* ---------------------------------------------------------------- cells */
 
 function WindowCell({ w, isApi, overage }: { w: WindowLimitDto | null; isApi: boolean; overage?: OverageDto | null }) {
@@ -251,7 +270,7 @@ function TokenTooltip({ h }: { h: HoverState }) {
   );
 }
 
-export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onToggle, onDelete, onRefreshOne }: {
+export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onToggle, onDelete, onRefreshOne, onShare }: {
   stats: PoolStats;
   groups: GroupDto[];
   showGroup: boolean;
@@ -260,6 +279,7 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
   onToggle: (a: AccountDto, v: boolean) => void;
   onDelete: (a: AccountDto) => void;
   onRefreshOne: (a: AccountDto) => void;
+  onShare?: (a: AccountDto, until: string | null) => void;
 }) {
   const groupName = (id: number | null) => groups.find((g) => g.id === id)?.name;
   const [hover, setHover] = useState<HoverState | null>(null);
@@ -306,12 +326,14 @@ export function AccountsTable({ stats, groups, showGroup, canManage, onEdit, onT
               <td>
                 <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
                   {healthBadge(a)}{creditsBadge(a)}{graceBadge(a)}
+                  {a.sharedUntil && new Date(a.sharedUntil) > new Date() && <span className="badge active" title="Lent to the shared pool">shared until {new Date(a.sharedUntil).toLocaleString()}</span>}
                 </div>
               </td>
               {canManage && (
                 <td>
                   <div className="row" style={{ alignItems: 'center' }}>
                     <Switch checked={a.enabled} onChange={(v) => onToggle(a, v)} />
+                    {onShare && <ShareControl a={a} onShare={(u) => onShare(a, u)} />}
                     <button className="sm ghost" onClick={() => onEdit(a)}>Edit</button>
                     <button className="sm ghost" onClick={() => onRefreshOne(a)} title="Refresh limits">↻</button>
                     <button className="sm danger" onClick={() => onDelete(a)}>Delete</button>

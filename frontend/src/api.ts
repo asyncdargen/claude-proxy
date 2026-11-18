@@ -159,6 +159,8 @@ export interface AccountDto {
   apiAuthStyle?: ApiAuthStyle;
   groupId: number | null;
   ownerId: number | null;
+  // ISO instant a personal account is lent to the shared pool until; null = not shared
+  sharedUntil?: string | null;
   priority: number;
   threshold: number;
   kind: AccountKind;
@@ -494,6 +496,7 @@ export const api = {
 
   // personal (per-user) accounts — tried before the global pool, excluded from global stats
   myAccounts: () => req<PoolStats>('GET', '/api/my/accounts'),
+  shareMyAccount: (id: number, until: string | null) => req<PoolStats>('PUT', `/api/my/accounts/${id}/share`, { until }),
   globalPool: () => req<PoolStats>('GET', '/api/my/global-pool'),
   createMyAccount: (b: unknown) => req<PoolStats>('POST', '/api/my/accounts', b),
   updateMyAccount: (id: number, b: unknown) => req<PoolStats>('PATCH', `/api/my/accounts/${id}`, b),
@@ -506,6 +509,7 @@ export const api = {
   // admin oversight of a user's personal accounts
   userAccounts: (uid: number) => req<PoolStats>('GET', `/api/users/${uid}/accounts`),
   updateUserAccount: (uid: number, id: number, b: unknown) => req<PoolStats>('PATCH', `/api/users/${uid}/accounts/${id}`, b),
+  shareUserAccount: (uid: number, id: number, until: string | null) => req<PoolStats>('PUT', `/api/users/${uid}/accounts/${id}/share`, { until }),
   deleteUserAccount: (uid: number, id: number) => req<PoolStats>('DELETE', `/api/users/${uid}/accounts/${id}`),
 
   groups: () => req<GroupDto[]>('GET', '/api/groups'),

@@ -40,6 +40,10 @@ export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange
   async function toggle(a: AccountDto, v: boolean) { setStats(await api.updateMyAccount(a.id, { enabled: v })); }
   async function del(a: AccountDto) { if (confirm(`Delete account "${a.name}"?`)) { await api.deleteMyAccount(a.id); setStats(await api.myAccounts()); } }
   async function refreshOne(a: AccountDto) { setStats(await api.refreshMyOne(a.id)); }
+  const [shareErr, setShareErr] = useState<string | null>(null);
+  async function share(a: AccountDto, until: string | null) {
+    try { setShareErr(null); setStats(await api.shareMyAccount(a.id, until)); } catch (e: any) { setShareErr(e.message); }
+  }
 
   if (err) return <div className="err">{err}</div>;
 
@@ -68,10 +72,11 @@ export function MyAccounts({ user, onUserChange }: { user: UserDto; onUserChange
 
       {!stats ? (<><SkeletonCards n={3} /><h2>Accounts by priority</h2><SkeletonTable rows={3} cols={6} /></>) : (
         <>
+          {shareErr && <div className="err" role="alert">{shareErr}</div>}
           <PoolCards stats={stats} scope="personal" shared={canUseGlobal ? globalStats : null} />
           <h2>Accounts by priority</h2>
           <AccountsTable stats={stats} groups={[]} showGroup={false} canManage
-            onEdit={setEditing} onToggle={toggle} onDelete={del} onRefreshOne={refreshOne} />
+            onEdit={setEditing} onToggle={toggle} onDelete={del} onRefreshOne={refreshOne} onShare={share} />
         </>
       )}
 

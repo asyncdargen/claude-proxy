@@ -86,10 +86,10 @@ class AccountPool {
      * one that happens to be broken. Threshold and rate-limit are ignored for the same reason
      * they are in [selectAny]: these requests consume no subscription usage.
      */
-    suspend fun selectAnyOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true): List<AccountRuntime> = mutex.withLock {
+    suspend fun selectAnyOrder(userId: Int?, allowedGroups: Set<Int>?, personalFirst: Boolean = true, allowGlobal: Boolean = true, now: Instant = Instant.now()): List<AccountRuntime> = mutex.withLock {
         val usable = accounts.values.filter { it.enabled && it.health == AccountHealth.OK }
         val personal = if (userId == null) emptyList() else usable.filter { it.ownerId == userId }
-        val global = if (!allowGlobal) emptyList() else usable.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
+        val global = if (!allowGlobal) emptyList() else usable.filter { it.inGlobalTier(userId, allowedGroups, now) }
         val byPriority = compareBy<AccountRuntime>({ it.priority }, { it.id })
         val ordered = if (personalFirst) personal.sortedWith(byPriority) + global.sortedWith(byPriority)
         else global.sortedWith(byPriority) + personal.sortedWith(byPriority)
@@ -100,7 +100,7 @@ class AccountPool {
     data class Availability(val enabledInScope: Int, val healthy: Int, val rateLimited: Int, val lostAccess: Int)
 
     suspend fun availability(userId: Int?, allowedGroups: Set<Int>?, now: Instant = Instant.now()): Availability = mutex.withLock {
-        val inScope = accounts.values.filter { it.enabled && inUserScope(it, userId, allowedGroups) }
+        val inScope = accounts.values.filter { it.enabled && inUserScope(it, userId, allowedGroups, now) }
         Availability(
             enabledInScope = inScope.size,
             healthy = inScope.count { it.health == AccountHealth.OK && !it.isHardLimited(now) },
@@ -114,7 +114,7 @@ class AccountPool {
         val healthy = accounts.values.filter { it.enabled && it.health == AccountHealth.OK && !it.isHardLimited(now) }
         val personal = if (userId == null) emptyList() else healthy.filter { it.ownerId == userId }
         // The shared pool is only a candidate tier when the caller may use it (POOL_GLOBAL_USE).
-        val global = if (!allowGlobal) emptyList() else healthy.filter { it.ownerId == null && canUseGlobal(it, allowedGroups) }
+        val global = if (!allowGlobal) emptyList() else healthy.filter { it.inGlobalTier(userId, allowedGroups, now) }
         // Resolved once per request rather than per tier: a setting flip between the two calls
         // would order the tiers by different rules and read as a routing bug.
         val strategy = SelectionStrategy.current()
@@ -149,9 +149,13 @@ class AccountPool {
         it.status == LimitStatus.REJECTED || (it.usageFraction() ?: 0.0) >= 1.0
     }
 
-    /** An account is in a user's routing scope if it is their personal account or a usable global one. */
-    private fun inUserScope(a: AccountRuntime, userId: Int?, allowedGroups: Set<Int>?): Boolean =
-        if (a.ownerId != null) a.ownerId == userId else canUseGlobal(a, allowedGroups)
+    /** An account is in a user's routing scope if it is their personal account or a usable pooled one. */
+    private fun inUserScope(a: AccountRuntime, userId: Int?, allowedGroups: Set<Int>?, now: Instant): Boolean =
+        (a.ownerId != null && a.ownerId == userId) || a.inGlobalTier(userId, allowedGroups, now)
+
+    /** The owner meets their own shared account in the personal tier; listing it again here would try it twice. */
+    private fun AccountRuntime.inGlobalTier(userId: Int?, allowedGroups: Set<Int>?, now: Instant): Boolean =
+        isPooled(now) && (ownerId == null || ownerId != userId) && canUseGlobal(this, allowedGroups)
 
     /** A user may use an ungrouped global account always, or a grouped one only if its group is allowed. */
     private fun canUseGlobal(a: AccountRuntime, allowedGroups: Set<Int>?): Boolean {

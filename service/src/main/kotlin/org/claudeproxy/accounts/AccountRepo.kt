@@ -38,6 +38,7 @@ data class AccountRuntime(
     val apiKeyMode: ApiKeyMode = ApiKeyMode.CLAUDE_CODE,
     val groupId: Int?,
     val ownerId: Int?,
+    val sharedUntil: Instant? = null,
     val priority: Int,
     val threshold: Double,
     val kind: AccountKind = AccountKind.NONE,
@@ -57,6 +58,9 @@ data class AccountRuntime(
     val proxy: AccountProxy? = null,
 ) {
     val isApiKey: Boolean get() = type == AccountType.API_KEY
+
+    /** In the shared pool: a global account, or a personal one its owner lent until [sharedUntil]. */
+    fun isPooled(now: Instant): Boolean = ownerId == null || sharedUntil?.isAfter(now) == true
 
     /** Upstream this account talks to, when it is not api.anthropic.com (API keys only). */
     val upstreamBaseUrl: String? get() = baseUrl?.takeIf { isApiKey && it.isNotBlank() }?.trimEnd('/')
@@ -89,7 +93,7 @@ data class AccountRuntime(
         return AccountDto(
             id = id, name = name, type = type.name, apiKeyMode = apiKeyMode.name,
             baseUrl = upstreamBaseUrl, apiAuthStyle = apiAuthStyle.name,
-            groupId = groupId, ownerId = ownerId, priority = priority,
+            groupId = groupId, ownerId = ownerId, sharedUntil = sharedUntil?.takeIf { it.isAfter(Instant.now()) }?.toString(), priority = priority,
             threshold = threshold, kind = kind.name, enabled = enabled,
             overThreshold = overThreshold,
             health = health.name,
@@ -188,6 +192,7 @@ object AccountRepo {
                 apiKeyMode = ApiKeyMode.fromString(row[Accounts.apiKeyMode]) ?: ApiKeyMode.CLAUDE_CODE,
                 groupId = row[Accounts.groupId],
                 ownerId = row[Accounts.ownerId],
+                sharedUntil = row[Accounts.sharedUntil],
                 priority = row[Accounts.priority],
                 threshold = row[Accounts.threshold],
                 kind = AccountKind.fromString(row[Accounts.kind]) ?: AccountKind.NONE,
@@ -254,6 +259,11 @@ object AccountRepo {
     /** True if account [id] exists and is owned by [userId] (a personal account of that user). */
     fun isOwnedBy(id: Int, userId: Int): Boolean = transaction {
         Accounts.selectAll().where { (Accounts.id eq id) and (Accounts.ownerId eq userId) }.any()
+    }
+
+    /** Lend personal account [id] to the shared pool until [until]; null stops sharing. */
+    fun setSharedUntil(id: Int, until: Instant?) = transaction {
+        Accounts.update({ Accounts.id eq id }) { it[sharedUntil] = until }
     }
 
     /** Detach global accounts created by [userId] so the user can be deleted (Postgres FK). */

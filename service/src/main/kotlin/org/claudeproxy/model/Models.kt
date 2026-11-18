@@ -194,6 +194,8 @@ data class AccountDto(
     val groupId: Int?,
     // null = global (shared pool); otherwise the owning user's id (personal account)
     val ownerId: Int? = null,
+    // ISO instant a personal account is lent to the shared pool until (null = not shared)
+    val sharedUntil: String? = null,
     val priority: Int,
     val threshold: Double,
     val kind: String = "NONE",
