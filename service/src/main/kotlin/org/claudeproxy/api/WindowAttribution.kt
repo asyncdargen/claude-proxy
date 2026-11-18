@@ -16,6 +16,11 @@ import java.time.Instant
 @Serializable data class AttributionContributor(val key: String, val userId: Int?, val username: String, val amount: Double, val method: String)
 data class AttributionUsage(val accountId: Int, val userId: Int?, val ts: Instant, val cost: Double, val costKnown: Boolean, val tokens: Long)
 
+/** Headroom over the period's average rise-per-spend: model mix and caching move the real rate. */
+private const val CREDIT_SLACK = 1.25
+/** How long a request's not-yet-visible share may still claim a later step of the reading. */
+private const val CREDIT_CARRY_SECONDS = 1800L
+
 /** Estimates only: request completion timestamps do not exactly align with quota header observations. */
 internal fun attributeWindow(
     accountId: Int, kind: String, samples: List<WindowSample>, events: List<AttributionUsage>,
@@ -87,20 +92,68 @@ private fun attributePeriod(
     val methods = mutableMapOf<String,String>()
     var highWater = sorted.first().util
     val points = mutableListOf(AttributionPoint(sorted.first().ts.toString(),sorted.first().util,values.toMap()))
-    sorted.zipWithNext().forEach { (a,b) ->
+    class Interval(val b: WindowSample, val cost: Boolean, val weights: Map<String,Double>)
+    val intervals = sorted.zipWithNext().map { (a,b) ->
         while (events.isNotEmpty() && events.first.ts <= a.ts) events.removeFirst()
         val requests = mutableListOf<AttributionUsage>()
         while (events.isNotEmpty() && events.first.ts <= b.ts) requests += events.removeFirst()
         val cost = requests.all { it.costKnown && it.cost.isFinite() && it.cost > 0 }
-        val weights = requests.groupBy { it.userId?.takeIf(names::containsKey)?.let { "user:$it" } ?: "unattributed" }
-            .mapValues { (_, es) -> es.sumOf { if (cost) it.cost else it.tokens.coerceAtLeast(0).toDouble() } }
-        val sum = weights.values.sum()
-        val delta = (b.util-highWater).coerceAtLeast(0.0)
+        Interval(b,cost,requests.groupBy { it.userId?.takeIf(names::containsKey)?.let { "user:$it" } ?: "unattributed" }
+            .mapValues { (_, es) -> es.sumOf { if (cost) it.cost else it.tokens.coerceAtLeast(0).toDouble() } })
+    }
+    // The window also moves for usage the proxy never saw (the subscription used elsewhere) and
+    // jumps when Anthropic corrects its counter. Handing a whole step to whoever had a request in
+    // that gap once billed a quarter of an Ultra week to two Haiku calls worth $0.0014. A request
+    // can claim at most what the period's own rate (rise per unit of spend) says it is worth.
+    val rise = (sorted.maxOf { it.util } - sorted.first().util).coerceAtLeast(0.0)
+    val costUnits = intervals.filter { it.cost }.sumOf { it.weights.values.sum() }
+    val tokenUnits = intervals.filter { !it.cost }.sumOf { it.weights.values.sum() }
+    fun rate(cost: Boolean) = (if (cost) costUnits else tokenUnits).let { if (it > 0) rise/it else 0.0 }
+    // Readings come in 0.01 steps and trail the requests that caused them, so a request's unused
+    // share stays claimable for a while instead of the next step landing in "unattributed".
+    class Credit(val earned: Instant, var amount: Double, val tokens: Boolean)
+    val credit = mutableMapOf<String,ArrayDeque<Credit>>()
+    fun award(key: String, amount: Double, tokens: Boolean) {
+        if (amount <= 0) return
+        values[key] = (values[key] ?: 0.0) + amount
+        methods[key] = if (tokens || methods[key] == "tokens") "tokens" else "cost"
+    }
+    intervals.forEach { interval ->
+        val b = interval.b
+        credit.values.forEach { q -> q.removeAll { it.earned < b.ts.minusSeconds(CREDIT_CARRY_SECONDS) || it.amount <= 0 } }
+        var remaining = (b.util-highWater).coerceAtLeast(0.0)
         highWater = maxOf(highWater,b.util)
-        if (sum > 0) weights.forEach { (key,weight) ->
-            values[key] = (values[key] ?: 0.0) + delta * weight/sum
-            if (delta > 0 && weight > 0) methods[key] = if (!cost || methods[key] == "tokens") "tokens" else "cost"
-        } else values["unattributed"] = values.getValue("unattributed") + delta
+        // This interval's own requests come first, then credit carried from earlier ones.
+        val fresh = interval.weights.mapValues { it.value * rate(interval.cost) * CREDIT_SLACK }.filterValues { it > 0 }
+        val freshSum = fresh.values.sum()
+        val fromFresh = minOf(remaining,freshSum)
+        fresh.forEach { (key,share) ->
+            val taken = if (freshSum > 0) fromFresh * share/freshSum else 0.0
+            award(key,taken,!interval.cost)
+            if (share > taken) credit.getOrPut(key) { ArrayDeque() } += Credit(b.ts,share-taken,!interval.cost)
+        }
+        remaining -= fromFresh
+        // Someone still sending requests is the likelier owner of a trailing step than someone idle.
+        for (active in listOf(true,false)) {
+            val carried = credit.filterKeys { (it in interval.weights) == active }
+                .mapValues { (_,q) -> q.sumOf { it.amount } }.filterValues { it > 0 }
+            val carriedSum = carried.values.sum()
+            val fromCarried = minOf(remaining,carriedSum)
+            if (fromCarried <= 0) continue
+            carried.forEach { (key,held) ->
+                var owed = fromCarried * held/carriedSum
+                var tokens = false
+                for (c in credit.getValue(key)) {
+                    if (owed <= 0) break
+                    val used = minOf(owed,c.amount)
+                    c.amount -= used; owed -= used
+                    tokens = tokens || c.tokens
+                }
+                award(key,fromCarried * held/carriedSum,tokens)
+            }
+            remaining -= fromCarried
+        }
+        values["unattributed"] = values.getValue("unattributed") + remaining
         // Keep the high-water ledger, but reconcile each displayed point to the actual reading.
         val scale = if (highWater > 0) b.util / highWater else 0.0
         points += AttributionPoint(b.ts.toString(),b.util,values.mapValues { it.value * scale })

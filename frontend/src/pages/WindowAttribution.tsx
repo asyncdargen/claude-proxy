@@ -176,7 +176,7 @@ export function WindowAttributionBlock({ user }: { user: UserDto }) {
       <h2>Window attribution</h2>
       <button className="ghost sm" onClick={() => setRefresh((r) => r + 1)}>Refresh attribution</button>
     </div>
-    <p className="hint">Estimated user split · weighted by request cost/tokens; unallocated includes gaps and delayed measurements. Percentages are of one account quota, not shares of usage.</p>
+    <p className="hint">Estimated user split · weighted by request cost/tokens; a request is credited at most what its cost is worth at the period's rate, so unallocated includes gaps, delayed measurements and usage outside the proxy. Percentages are of one account quota, not shares of usage.</p>
     {!!data?.accounts.length && <label className="attribution-field attribution-account"><span>Attribution account</span>
       <select value={account?.accountId} onChange={(e) => setAccountId(Number(e.target.value))}>
         {data.accounts.map((a) => <option key={a.accountId} value={a.accountId}>{a.accountName} · {a.provider} · #{a.accountId}</option>)}

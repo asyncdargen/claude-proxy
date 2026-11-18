@@ -147,8 +147,31 @@ class WindowAttributionTest {
         val p = periods(listOf(sample(0,0.55),sample(60,0.54),sample(120,0.55),sample(180,0.71),sample(240,0.69),sample(300,0.71)),
             listOf(event(90,1,1.0),event(150,2,1.0),event(270,1,1.0))).single()
         assertEquals(0.71,p.contributors.sumOf { it.amount },1e-9)
-        assertFalse(p.contributors.any { it.userId == 1 && it.amount > 0 })
+        // Only the real rise (0.55 → 0.71) is anyone's usage; the dip and its recovery are not.
+        assertTrue(p.contributors.filter { it.userId != null }.sumOf { it.amount } <= 0.16 + 1e-9)
         p.points.forEach { assertEquals(it.total,it.values.values.sum(),1e-9) }
+    }
+
+    @Test fun `a jump far beyond what the gap's requests could cost stays unattributed`() {
+        // Prod shape: steady paid traffic sets the rate, then after a quiet half hour the reading
+        // leaps 0.30 while the only request in that gap is a fraction of a cent.
+        val busy = (1..10).map { sample(it * 60L, it / 100.0) }
+        val busyEvents = (1..10).map { event(it * 60L - 30, 2, 10.0) }
+        val p = periods(listOf(sample(0,0.0)) + busy + listOf(sample(2400,0.10),sample(4400,0.40)),
+            busyEvents + event(4390,1,0.001), now = t.plusSeconds(4500)).single()
+        val values = p.contributors.associate { it.key to it.amount }
+        assertEquals(0.10,values.getValue("user:2"),1e-9)
+        assertTrue((values["user:1"] ?: 0.0) < 0.001, "cheap request took ${values["user:1"]}")
+        assertEquals(0.30,values.getValue("unattributed"),1e-3)
+        p.points.forEach { assertEquals(it.total,it.values.values.sum(),1e-9) }
+    }
+
+    @Test fun `usage that surfaces as a later rounding step is still credited to its requests`() {
+        // Each request is worth a quarter of a 0.01 step; the reading only moves once all four landed.
+        val p = periods(listOf(sample(0,0.0),sample(60,0.0),sample(120,0.0),sample(180,0.0),sample(240,0.04)),
+            listOf(event(30,1,1.0),event(90,1,1.0),event(150,1,1.0),event(210,1,1.0))).single()
+        assertEquals(0.04,p.contributors.single { it.userId == 1 }.amount,1e-9)
+        assertTrue(p.contributors.none { it.key == "unattributed" })
     }
 
     @Test fun `observed delta is weighted by known request cost and opening reading stays unattributed`() {
