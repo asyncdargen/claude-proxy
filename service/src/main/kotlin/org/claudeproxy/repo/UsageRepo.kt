@@ -3,10 +3,19 @@ package org.claudeproxy.repo
 import kotlinx.serialization.Serializable
 import org.claudeproxy.db.Accounts
 import org.claudeproxy.db.UsageEvents
+import org.jetbrains.exposed.sql.Expression
+import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.notInList
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.compoundAnd
+import org.jetbrains.exposed.sql.count
+import org.jetbrains.exposed.sql.max
+import org.jetbrains.exposed.sql.sum
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -100,14 +109,33 @@ object UsageRepo {
         return cost
     }
 
-    private fun accumulate(rows: Iterable<ResultRow>): Totals {
-        var req = 0L; var input = 0L; var output = 0L; var cr = 0L; var cw = 0L; var cost = 0.0
-        rows.forEach {
-            req += 1; input += it[UsageEvents.inputTokens]; output += it[UsageEvents.outputTokens]
-            cr += it[UsageEvents.cacheReadTokens]; cw += it[UsageEvents.cacheWriteTokens]; cost += it[UsageEvents.cost]
+    private val requestCount = UsageEvents.id.count()
+    private val inputSum = UsageEvents.inputTokens.sum()
+    private val outputSum = UsageEvents.outputTokens.sum()
+    private val cacheReadSum = UsageEvents.cacheReadTokens.sum()
+    private val cacheWriteSum = UsageEvents.cacheWriteTokens.sum()
+    private val costSum = UsageEvents.cost.sum()
+    private val lastTs = UsageEvents.ts.max()
+
+    /**
+     * Count and sums computed by the database, one row per group of [keys] (one row in all when
+     * there are none). Every all-time figure goes through here: loading the events to add them up
+     * in the JVM made each stats read cost the whole table, and the table grows by every request.
+     */
+    private fun aggregate(where: List<Op<Boolean>>, vararg keys: Expression<*>): List<Pair<ResultRow, Totals>> {
+        var query = UsageEvents.select(listOf(*keys, requestCount, inputSum, outputSum, cacheReadSum, cacheWriteSum, costSum, lastTs))
+        if (where.isNotEmpty()) query = query.where(where.compoundAnd())
+        if (keys.isNotEmpty()) query = query.groupBy(*keys)
+        return query.map { row ->
+            row to Totals(
+                row[requestCount], row[inputSum] ?: 0, row[outputSum] ?: 0,
+                row[cacheReadSum] ?: 0, row[cacheWriteSum] ?: 0, row[costSum] ?: 0.0,
+            )
         }
-        return Totals(req, input, output, cr, cw, cost)
     }
+
+    private fun excludingPersonal(): Op<Boolean>? =
+        personalAccountIds().takeIf { it.isNotEmpty() }?.let { UsageEvents.accountId notInList it }
 
     /** Ids of personal (owner-scoped) accounts; their usage is excluded from global stats. */
     private fun personalAccountIds(): Set<Int> =
@@ -121,53 +149,45 @@ object UsageRepo {
      */
     fun userTotals(userId: Int, since: Instant? = null, globalOnly: Boolean = false, source: String? = null): Totals = transaction {
         val personal = if (globalOnly) personalAccountIds() else emptySet()
-        val q = if (since != null)
-            UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
-        else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        accumulate(
-            q.asSequence().filter { row ->
-                (personal.isEmpty() || row[UsageEvents.accountId] !in personal) &&
-                    (source == null || row[UsageEvents.sourceCol] == source)
-            }.asIterable(),
-        )
+        aggregate(
+            listOfNotNull(
+                UsageEvents.userId eq userId,
+                since?.let { UsageEvents.ts greaterEq it },
+                personal.takeIf { it.isNotEmpty() }?.let { UsageEvents.accountId notInList it },
+                source?.let { UsageEvents.sourceCol eq it },
+            ),
+        ).single().second
     }
 
     /** Per-account totals for a specific set of accounts (used by the personal "My Accounts" view). */
     fun totalsForAccounts(ids: Set<Int>): Map<Int, Totals> = transaction {
         if (ids.isEmpty()) return@transaction emptyMap()
-        val acc = HashMap<Int, MutableList<ResultRow>>()
-        UsageEvents.selectAll().where { UsageEvents.accountId inList ids }
-            .forEach { acc.getOrPut(it[UsageEvents.accountId]) { mutableListOf() }.add(it) }
-        acc.mapValues { (_, rows) -> accumulate(rows) }
+        aggregate(listOf(UsageEvents.accountId inList ids), UsageEvents.accountId)
+            .associate { (row, totals) -> row[UsageEvents.accountId] to totals }
     }
 
-    private fun perModelOf(rows: Iterable<ResultRow>): List<ModelUsageDto> {
-        val acc = HashMap<String?, DoubleArray>()
-        rows.forEach { row ->
-            val a = acc.getOrPut(row[UsageEvents.model]) { DoubleArray(3) }
-            a[0] += 1
-            a[1] += row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] + row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
-            a[2] += row[UsageEvents.cost]
-        }
-        return acc.map { (m, a) -> ModelUsageDto(m, a[0].toLong(), a[1].toLong(), a[2]) }.sortedByDescending { it.cost }
-    }
+    private fun perModelOf(where: List<Op<Boolean>>): List<ModelUsageDto> =
+        aggregate(where, UsageEvents.model)
+            .map { (row, totals) -> ModelUsageDto(row[UsageEvents.model], totals.requests, totals.clean, totals.cost) }
+            .sortedByDescending { it.cost }
 
     /**
      * Per-model breakdown for a single user; [since] limits to events at/after that instant,
      * [source] ("proxy" | "routing") restricts to one datapath.
      */
     fun userPerModel(userId: Int, since: Instant? = null, source: String? = null): List<ModelUsageDto> = transaction {
-        val q = if (since != null)
-            UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
-        else UsageEvents.selectAll().where { UsageEvents.userId eq userId }
-        perModelOf(if (source == null) q else q.filter { it[UsageEvents.sourceCol] == source })
+        perModelOf(
+            listOfNotNull(
+                UsageEvents.userId eq userId,
+                since?.let { UsageEvents.ts greaterEq it },
+                source?.let { UsageEvents.sourceCol eq it },
+            ),
+        )
     }
 
     /** Pool-wide per-model breakdown (excludes personal accounts); [since] limits the window. */
     fun perModel(since: Instant? = null): List<ModelUsageDto> = transaction {
-        val personal = personalAccountIds()
-        val q = if (since != null) UsageEvents.selectAll().where { UsageEvents.ts greaterEq since } else UsageEvents.selectAll()
-        perModelOf(if (personal.isEmpty()) q else q.filter { it[UsageEvents.accountId] !in personal })
+        perModelOf(listOfNotNull(since?.let { UsageEvents.ts greaterEq it }, excludingPersonal()))
     }
 
     fun recentForUser(userId: Int, limit: Int = 100, source: String? = null): List<UsageEventDto> = transaction {
@@ -178,20 +198,12 @@ object UsageRepo {
     }
 
     fun totalsPerAccount(): Map<Int, Totals> = transaction {
-        val personal = personalAccountIds()
-        val acc = HashMap<Int, MutableList<ResultRow>>()
-        UsageEvents.selectAll().forEach {
-            val aid = it[UsageEvents.accountId]
-            if (aid in personal) return@forEach
-            acc.getOrPut(aid) { mutableListOf() }.add(it)
-        }
-        acc.mapValues { (_, rows) -> accumulate(rows) }
+        aggregate(listOfNotNull(excludingPersonal()), UsageEvents.accountId)
+            .associate { (row, totals) -> row[UsageEvents.accountId] to totals }
     }
 
     fun poolTotals(): Totals = transaction {
-        val personal = personalAccountIds()
-        accumulate(if (personal.isEmpty()) UsageEvents.selectAll()
-                   else UsageEvents.selectAll().filter { it[UsageEvents.accountId] !in personal })
+        aggregate(listOfNotNull(excludingPersonal())).single().second
     }
 
     /**
@@ -275,12 +287,8 @@ object UsageRepo {
 
     /** All-time totals per inbound token for one user's usage on one datapath ("proxy" | "routing"). */
     fun totalsPerTokenForUser(userId: Int, source: String): Map<Int?, Totals> = transaction {
-        val acc = HashMap<Int?, MutableList<ResultRow>>()
-        UsageEvents.selectAll().where { UsageEvents.userId eq userId }.forEach {
-            if (it[UsageEvents.sourceCol] != source) return@forEach
-            acc.getOrPut(it[UsageEvents.tokenId]) { mutableListOf() }.add(it)
-        }
-        acc.mapValues { (_, rows) -> accumulate(rows) }
+        aggregate(listOf(UsageEvents.userId eq userId, UsageEvents.sourceCol eq source), UsageEvents.tokenId)
+            .associate { (row, totals) -> row[UsageEvents.tokenId] to totals }
     }
 
     /** Daily (account, model, day) token buckets in [start, end), bucketed by date in [zone], kinds kept apart. Excludes personal accounts. */
@@ -329,24 +337,21 @@ object UsageRepo {
      */
     fun overviewByUser(startOfDay: Instant, startOfLimitDay: Instant = startOfDay): List<UserOverviewRow> = transaction {
         val acc = HashMap<Int?, UserOverviewRow>()
-        UsageEvents.selectAll().forEach { row ->
-            val r = acc.getOrPut(row[UsageEvents.userId]) { UserOverviewRow(row[UsageEvents.userId]) }
-            val cost = row[UsageEvents.cost]
-            val tokens = row[UsageEvents.inputTokens] + row[UsageEvents.outputTokens] +
-                row[UsageEvents.cacheReadTokens] + row[UsageEvents.cacheWriteTokens]
-            val routing = row[UsageEvents.sourceCol] == "routing"
-            if (routing) r.totalRoutingCost += cost else r.totalProxyCost += cost
-            r.totalRequests += 1; r.totalTokens += tokens
-            val ts = row[UsageEvents.ts]
-            if (ts >= startOfDay) {
-                r.todayCost += cost
-                r.todayRequests += 1; r.todayTokens += tokens
-            }
-            if (ts >= startOfLimitDay) {
-                if (routing) r.todayRoutingCost += cost else r.todayProxyCost += cost
-            }
-            val last = r.lastActivity
-            if (last == null || ts > last) r.lastActivity = ts
+        fun of(row: ResultRow) = acc.getOrPut(row[UsageEvents.userId]) { UserOverviewRow(row[UsageEvents.userId]) }
+        aggregate(emptyList(), UsageEvents.userId, UsageEvents.sourceCol).forEach { (row, totals) ->
+            val r = of(row)
+            if (row[UsageEvents.sourceCol] == "routing") r.totalRoutingCost += totals.cost else r.totalProxyCost += totals.cost
+            r.totalRequests += totals.requests; r.totalTokens += totals.clean
+            val last = row[lastTs]
+            if (last != null && r.lastActivity.let { it == null || last > it }) r.lastActivity = last
+        }
+        aggregate(listOf(UsageEvents.ts greaterEq startOfDay), UsageEvents.userId).forEach { (row, totals) ->
+            val r = of(row)
+            r.todayCost += totals.cost; r.todayRequests += totals.requests; r.todayTokens += totals.clean
+        }
+        aggregate(listOf(UsageEvents.ts greaterEq startOfLimitDay), UsageEvents.userId, UsageEvents.sourceCol).forEach { (row, totals) ->
+            val r = of(row)
+            if (row[UsageEvents.sourceCol] == "routing") r.todayRoutingCost += totals.cost else r.todayProxyCost += totals.cost
         }
         acc.values.toList()
     }
@@ -364,17 +369,12 @@ object UsageRepo {
 
     fun summarySince(since: Instant): List<UsageSummaryDto> = transaction {
         val names = accountNames()
-        val personal = personalAccountIds()
-        val acc = HashMap<Int, MutableList<ResultRow>>()
-        UsageEvents.selectAll().where { UsageEvents.ts greaterEq since }.forEach {
-            val aid = it[UsageEvents.accountId]
-            if (aid in personal) return@forEach
-            acc.getOrPut(aid) { mutableListOf() }.add(it)
-        }
-        acc.map { (aid, rows) ->
-            val t = accumulate(rows)
-            UsageSummaryDto(aid, names[aid], t.requests, t.input, t.output, t.cost)
-        }.sortedByDescending { it.requests }
+        aggregate(listOfNotNull(UsageEvents.ts greaterEq since, excludingPersonal()), UsageEvents.accountId)
+            .map { (row, t) ->
+                val aid = row[UsageEvents.accountId]
+                UsageSummaryDto(aid, names[aid], t.requests, t.input, t.output, t.cost)
+            }
+            .sortedByDescending { it.requests }
     }
 
     private fun accountNames() = Accounts.selectAll().associate { it[Accounts.id] to it[Accounts.name] }
