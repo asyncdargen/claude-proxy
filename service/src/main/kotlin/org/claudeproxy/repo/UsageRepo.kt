@@ -77,7 +77,9 @@ object UsageRepo {
         val cost = ModelPriceRepo.costOf(model, usage)
         runCatching {
             transaction {
+                val lentBy = Accounts.selectAll().where { Accounts.id eq accountId }.firstOrNull()?.get(Accounts.ownerId)?.takeIf { it != userId }
                 UsageEvents.insert {
+                    it[lentByUserId] = lentBy
                     it[UsageEvents.accountId] = accountId
                     it[UsageEvents.userId] = userId
                     it[UsageEvents.tokenId] = tokenId
@@ -116,11 +118,13 @@ object UsageRepo {
     /**
      * Totals for one user. [globalOnly] excludes usage that went through the user's own
      * personal accounts — used for the daily-limit check, which governs only shared-pool spend.
+     * Another user's personal account is reachable only while its owner shares it, so that
+     * spend is pool spend and stays in.
      * [source], when set ("proxy" | "routing"), restricts to events from that datapath — the
      * per-datapath daily limits meter their own spend independently.
      */
     fun userTotals(userId: Int, since: Instant? = null, globalOnly: Boolean = false, source: String? = null): Totals = transaction {
-        val personal = if (globalOnly) personalAccountIds() else emptySet()
+        val personal = if (globalOnly) Accounts.selectAll().where { Accounts.ownerId eq userId }.map { it[Accounts.id] }.toSet() else emptySet()
         val q = if (since != null)
             UsageEvents.selectAll().where { (UsageEvents.userId eq userId) and (UsageEvents.ts greaterEq since) }
         else UsageEvents.selectAll().where { UsageEvents.userId eq userId }

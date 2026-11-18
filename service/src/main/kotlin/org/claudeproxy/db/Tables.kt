@@ -226,6 +226,8 @@ object Accounts : Table("accounts") {
     // null = global (shared pool); otherwise a personal account owned by this user, tried
     // before the global pool and excluded from global statistics.
     val ownerId = integer("owner_id").references(Users.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE).nullable()
+    // personal account only: lent to the shared pool until this instant (null or past = not shared)
+    val sharedUntil = timestamp("shared_until").nullable()
     val createdBy = integer("created_by").references(Users.id).nullable()
     val createdAt = timestamp("created_at")
     override val primaryKey = PrimaryKey(id)
@@ -279,6 +281,9 @@ object UsageEvents : Table("usage_events") {
     // must keep its usage history. `source` picks the namespace ("proxy" → proxy_tokens.id,
     // "routing" → routing_tokens.id); null = pre-migration rows or token-less attempts.
     val tokenId = integer("token_id").nullable()
+    // Personal-through-pool: the owner of a personal account when someone else used it because it was
+    // shared with the pool. Null = global account, or the owner's own use. Not an FK: history outlives users.
+    val lentByUserId = integer("lent_by_user_id").nullable()
     override val primaryKey = PrimaryKey(id)
     // Range reads per account (window attribution).
     init { index(false, accountId, ts) }

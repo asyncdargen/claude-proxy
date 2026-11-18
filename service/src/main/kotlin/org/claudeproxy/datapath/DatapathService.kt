@@ -132,7 +132,7 @@ class DatapathService(private val pool: AccountPool) {
     /** Why the pool had nothing to offer, per account in the user's reach. */
     private suspend fun logNoCandidate(userId: Int, source: String) {
         val now = Instant.now()
-        val reasons = pool.snapshot().filter { it.ownerId == null || it.ownerId == userId }.joinToString("; ") { a ->
+        val reasons = pool.snapshot().filter { it.ownerId == userId || it.isPooled(now) }.joinToString("; ") { a ->
             val util = a.limit.usageFraction()
             val why = when {
                 !a.enabled -> "disabled"
@@ -192,7 +192,7 @@ class DatapathService(private val pool: AccountPool) {
         // `cost` is the very number persisted on the usage row, so the limit can never drift from
         // what the stats show.
         val ownerId = pool.get(o.accountId)?.ownerId
-        if (o.userId != null && ownerId == null && cost > 0.0) {
+        if (o.userId != null && ownerId != o.userId && cost > 0.0) {
             MemoryCache.incrExistingByFloat(spendKey(o.userId, source), cost)
         }
 

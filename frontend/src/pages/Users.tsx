@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AccountDto, api, fmtTokens, fmtUsd, GroupDto, PoolStats, RoleDto, UserDto } from '../api';
-import { AccountEditModal } from '../accounts';
+import { AccountEditModal, ShareControl } from '../accounts';
 import { Check, Modal, NumberInput, Switch } from '../ui';
 import { SkeletonLine, SkeletonTable } from '../Skeleton';
 
@@ -108,6 +108,7 @@ function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => vo
 
   async function toggle(a: AccountDto, v: boolean) { setStats(await api.updateUserAccount(user.id, a.id, { enabled: v })); }
   async function del(a: AccountDto) { if (confirm(`Delete ${user.username}'s account "${a.name}"?`)) setStats(await api.deleteUserAccount(user.id, a.id)); }
+  async function share(a: AccountDto, until: string | null) { try { setErr(null); setStats(await api.shareUserAccount(user.id, a.id, until)); } catch (e: any) { setErr(e.message); } }
   const pct = (f: number | null | undefined) => (f != null ? `${Math.round(f * 100)}%` : '—');
 
   return (
@@ -131,6 +132,7 @@ function UserAccountsModal({ user, onClose }: { user: UserDto; onClose: () => vo
                     <td><Switch checked={a.enabled} onChange={(v) => toggle(a, v)} /></td>
                     <td>
                       <div className="row">
+                        <ShareControl a={a} onShare={(u) => share(a, u)} />
                         <button className="sm" onClick={() => setEditing(a)}>Edit</button>
                         <button className="sm danger" onClick={() => del(a)}>Delete</button>
                       </div>

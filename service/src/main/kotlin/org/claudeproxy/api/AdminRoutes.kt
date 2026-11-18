@@ -8,8 +8,10 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import org.claudeproxy.accounts.AccountPool
+import org.claudeproxy.accounts.AccountRuntime
 import org.claudeproxy.accounts.AccountRepo
 import org.claudeproxy.accounts.AccountSecret
 import org.claudeproxy.accounts.LimitProbe
@@ -97,6 +99,23 @@ fun Route.adminRoutes(
 }
 
 // ---- helpers ----
+
+private val MAX_SHARE = java.time.Duration.ofDays(14)
+private val SHARE_CLOCK_SLACK = java.time.Duration.ofMinutes(5)
+
+/** `until` null stops sharing; otherwise it must lie in the future and within [MAX_SHARE]. */
+internal fun ShareAccountRequest.sharedUntil(now: java.time.Instant = java.time.Instant.now()): java.time.Instant? {
+    val at = until?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() ?: throw InputError("until must be an ISO instant") } ?: return null
+    if (!at.isAfter(now)) throw InputError("until must be in the future")
+    val cap = now.plus(MAX_SHARE)
+    // a client clock a little ahead must not turn the "14 days" preset into a 400
+    if (at.isAfter(cap.plus(SHARE_CLOCK_SLACK))) throw InputError("an account can be shared for 14 days at most")
+    return minOf(at, cap)
+}
+
+/** A custom upstream or outbound proxy is the owner's own egress: other users' prompts must not be routed through it. */
+internal fun AccountRuntime.sharingRefusal(): String? =
+    if (upstreamBaseUrl != null || proxy != null) "an account with a custom upstream or outbound proxy cannot be shared" else null
 
 private fun userToDto(user: org.claudeproxy.repo.UserAuth): UserDto = UserRepo.get(user.id)!!
 
@@ -375,6 +394,19 @@ private fun Route.myAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         runCatching { probe.probe(id) }
         call.respond(buildOwnedStats(pool, user.id))
     }
+    put("/my/accounts/{id}/share") {
+        val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
+        val id = call.parameters["id"]?.toIntOrNull()
+            ?: return@put call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(id, user.id)) return@put call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        val until = try { call.receive<ShareAccountRequest>().sharedUntil() } catch (e: InputError) {
+            return@put call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
+        }
+        if (until != null) pool.get(id)?.sharingRefusal()?.let { return@put call.respond(HttpStatusCode.BadRequest, MessageResponse(it)) }
+        AccountRepo.setSharedUntil(id, until)
+        pool.reload()
+        call.respond(buildOwnedStats(pool, user.id))
+    }
     patch("/my/accounts/{id}") {
         val user = call.requirePermission(Permission.ACCOUNTS_OWN_MANAGE)
         val id = call.parameters["id"]?.toIntOrNull()
@@ -476,6 +508,20 @@ private fun Route.userAccountRoutes(pool: AccountPool, probe: LimitProbe) {
         AccountRepo.updateConfig(aid, req.name, null, req.priority, req.threshold, v.kind, req.enabled, req.deviceId, clearGroup = true, overThreshold = req.overThreshold,
             accountUuid = req.accountUuid, apiKeyMode = v.apiKeyMode, baseUrl = v.baseUrl, apiAuthStyle = v.apiAuthStyle)
         applyProxy(aid, req.proxy)
+        pool.reload()
+        call.respond(buildOwnedStats(pool, uid))
+    }
+    put("/users/{id}/accounts/{aid}/share") {
+        call.requirePermission(Permission.USERS_MANAGE)
+        val uid = call.parameters["id"]?.toIntOrNull()
+        val aid = call.parameters["aid"]?.toIntOrNull()
+        if (uid == null || aid == null) return@put call.respond(HttpStatusCode.BadRequest, MessageResponse("bad id"))
+        if (!AccountRepo.isOwnedBy(aid, uid)) return@put call.respond(HttpStatusCode.NotFound, MessageResponse("not found"))
+        val until = try { call.receive<ShareAccountRequest>().sharedUntil() } catch (e: InputError) {
+            return@put call.respond(HttpStatusCode.BadRequest, MessageResponse(e.message ?: "invalid"))
+        }
+        if (until != null) pool.get(aid)?.sharingRefusal()?.let { return@put call.respond(HttpStatusCode.BadRequest, MessageResponse(it)) }
+        AccountRepo.setSharedUntil(aid, until)
         pool.reload()
         call.respond(buildOwnedStats(pool, uid))
     }

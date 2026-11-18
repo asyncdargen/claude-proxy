@@ -68,6 +68,9 @@ data class UpdateGroupRequest(val name: String)
 data class OAuthStartResponse(val authorizeUrl: String, val state: String)
 
 @Serializable
+data class ShareAccountRequest(val until: String? = null)
+
+@Serializable
 data class OAuthCompleteRequest(
     val state: String,
     val code: String,
