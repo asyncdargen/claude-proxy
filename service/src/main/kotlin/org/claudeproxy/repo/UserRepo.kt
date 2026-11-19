@@ -284,13 +284,11 @@ object UserRepo {
 
     fun delete(userId: Int) {
         val cacheKeys = tokenCacheKeys(userId)
-        transaction {
+        UsageRollup.exclusive { transaction {
             // clear rows that reference the user (Postgres enforces these FKs)
             org.claudeproxy.db.ProxyTokens.deleteWhere { org.claudeproxy.db.ProxyTokens.userId eq userId }
             org.claudeproxy.db.RoutingTokens.deleteWhere { org.claudeproxy.db.RoutingTokens.userId eq userId }
-            org.claudeproxy.db.UsageEvents.update({ org.claudeproxy.db.UsageEvents.userId eq userId }) {
-                it[org.claudeproxy.db.UsageEvents.userId] = null
-            }
+            UsageRepo.detachUser(userId)
             McpUsageRepo.detachUser(userId)
             // delete this user's personal accounts (their secrets/limits/usage cascade off Accounts)
             org.claudeproxy.db.Accounts.deleteWhere { org.claudeproxy.db.Accounts.ownerId eq userId }
@@ -302,7 +300,7 @@ object UserRepo {
             UserRoles.deleteWhere { UserRoles.userId eq userId }
             IdentityRepo.unlinkAll(userId)
             Users.deleteWhere { Users.id eq userId }
-        }
+        } }
         // a deleted user's tokens are gone from the DB; their cached resolves must go too
         cacheKeys.forEach(MemoryCache::evict)
     }

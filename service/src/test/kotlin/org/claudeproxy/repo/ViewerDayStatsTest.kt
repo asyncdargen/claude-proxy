@@ -27,7 +27,8 @@ class ViewerDayStatsTest {
 
     private fun connect(): Database {
         val db = Database.connect("jdbc:sqlite:${dbFile.absolutePath}", "org.sqlite.JDBC")
-        transaction(db) { SchemaUtils.create(UsageEvents) }
+        // The usage reads also consult the rollup and its watermark (a settings row).
+        transaction(db) { SchemaUtils.create(UsageEvents, org.claudeproxy.db.Settings, org.claudeproxy.db.UsageHourly) }
         return db
     }
 

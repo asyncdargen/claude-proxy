@@ -285,6 +285,35 @@ object UsageEvents : Table("usage_events") {
         index(false, accountId, ts)
         // Per-user reads: the daily-limit check on every request and each user's stats.
         index(false, userId, ts)
+        // The raw tail every read adds to the hourly rollup: the events since its last pass.
+        index(false, ts)
+    }
+}
+
+/**
+ * Hourly sums of [UsageEvents], one row per (hour, account, user, model, source, token) that saw
+ * traffic. Derived, never written by a request: [org.claudeproxy.repo.UsageRollup] rebuilds closed
+ * hours from the events, and the usage reads sum these rows for the hours they cover and the events
+ * for the rest, so a read costs the number of hourly groups rather than every request ever served.
+ * The events themselves are kept.
+ */
+object UsageHourly : Table("usage_hourly") {
+    val hour = timestamp("hour")
+    val accountId = integer("account_id").references(Accounts.id, onDelete = org.jetbrains.exposed.sql.ReferenceOption.CASCADE)
+    val userId = integer("user_id").nullable()
+    val model = varchar("model", 128).nullable()
+    val sourceCol = varchar("source", 16)
+    val tokenId = integer("token_id").nullable()
+    val requests = long("requests")
+    val inputTokens = long("input_tokens")
+    val outputTokens = long("output_tokens")
+    val cacheReadTokens = long("cache_read_tokens")
+    val cacheWriteTokens = long("cache_write_tokens")
+    val cost = double("cost")
+    val lastTs = timestamp("last_ts")
+    init {
+        index(false, hour)
+        index(false, userId, hour)
     }
 }
 
@@ -452,7 +481,7 @@ object OAuthAddSessions : Table("oauth_add_sessions") {
 val ALL_TABLES = arrayOf(
     Users, UserIdentities, Settings, ModelPrices, ModelPriceBase, ModelsLive, ModelOverrides, Roles, RolePermissions, UserRoles, ProxyTokens, RoutingTokens,
     AccountGroups, UserGroupAccess,
-    Accounts, AccountSecrets, AccountLimits, UsageEvents, McpToolCalls, WindowSnapshots,
+    Accounts, AccountSecrets, AccountLimits, UsageEvents, UsageHourly, McpToolCalls, WindowSnapshots,
     OAuthAddSessions, SessionOwners, SessionMap,
     Chats, ChatMessages, ChatAttachments, ChatMemories, ChatSettings,
 )

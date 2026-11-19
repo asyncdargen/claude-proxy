@@ -150,6 +150,7 @@ fun Application.module(
     kotlinx.coroutines.runBlocking { pool.reload() }
     refresher.start(GlobalScope)
     scheduler.start(GlobalScope)
+    org.claudeproxy.repo.UsageRollup.start(GlobalScope)
     startSessionMapPruner()
     startAttachmentPruner()
 

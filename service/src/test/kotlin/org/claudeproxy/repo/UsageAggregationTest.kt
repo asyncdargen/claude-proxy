@@ -6,18 +6,21 @@ import org.claudeproxy.cache.MemoryCache
 import org.claudeproxy.db.*
 import org.claudeproxy.model.*
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.io.File
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
 import kotlin.random.Random
 import kotlin.test.*
 
 /**
- * Every all-time figure is aggregated by the database instead of loading the events into the JVM.
- * Each function is checked here against the row-by-row semantics it replaced, over the same random
- * events, so the move changed the cost and nothing else.
+ * Usage reads are answered by the database, from the hourly rollup for the hours it holds and from
+ * the events for the rest. Every read is checked here against the row-by-row semantics it replaced,
+ * over the same random events, with no rollup, a rollup a day behind and a current one, so neither
+ * the move to SQL nor the rollup changed a figure.
  */
 class UsageAggregationTest {
     private class Event(
@@ -27,6 +30,8 @@ class UsageAggregationTest {
 
     private lateinit var db: File
     private val events = mutableListOf<Event>()
+    private val start: Instant get() = now.minus(Duration.ofDays(3)).minus(Duration.ofMinutes(17))
+    private val end: Instant get() = now.minus(Duration.ofMinutes(7))
     private var alice = 0
     private var bob = 0
     private val owner = HashMap<Int, Int?>()
@@ -90,7 +95,7 @@ class UsageAggregationTest {
 
     private val pool get() = events.filter { owner[it.account] == null }
 
-    @Test fun `user totals match the row by row sum for every filter`() {
+    private fun checkUserTotals() {
         for (user in listOf(alice, bob)) for (since in listOf(null, today)) for (globalOnly in listOf(false, true))
             for (source in listOf(null, "proxy", "routing", "chat")) {
                 val expected = events.filter {
@@ -101,22 +106,22 @@ class UsageAggregationTest {
             }
     }
 
-    @Test fun `per account and pool totals leave personal accounts out`() {
+    private fun checkPerAccountAndPool() {
         val perAccount = UsageRepo.totalsPerAccount()
         assertEquals(pool.map { it.account }.toSet(), perAccount.keys)
         pool.groupBy { it.account }.forEach { (id, rows) -> assertSame(totalsOf(rows), perAccount[id], "account $id") }
         assertSame(totalsOf(pool), UsageRepo.poolTotals(), "pool")
     }
 
-    @Test fun `totals for a set of accounts cover exactly that set`() {
+    private fun checkAccountSets() {
         val ids = owner.filterValues { it != null }.keys
         val actual = UsageRepo.totalsForAccounts(ids)
-        assertEquals(ids, actual.keys)
+        assertEquals(events.filter { it.account in ids }.map { it.account }.toSet(), actual.keys)
         events.filter { it.account in ids }.groupBy { it.account }.forEach { (id, rows) -> assertSame(totalsOf(rows), actual[id], "account $id") }
         assertEquals(emptyMap(), UsageRepo.totalsForAccounts(emptySet()))
     }
 
-    @Test fun `per model breakdowns match`() {
+    private fun checkPerModel() {
         fun check(expected: List<Event>, actual: List<ModelUsageDto>, label: String) {
             val byModel = expected.groupBy { it.model }
             assertEquals(byModel.keys, actual.map { it.model }.toSet(), label)
@@ -133,7 +138,7 @@ class UsageAggregationTest {
         check(pool.filter { it.ts >= today }, UsageRepo.perModel(today), "pool today")
     }
 
-    @Test fun `summary since and per token totals match`() {
+    private fun checkSummaryAndTokens() {
         val summary = UsageRepo.summarySince(today)
         val expected = pool.filter { it.ts >= today }.groupBy { it.account }
         assertEquals(expected.keys, summary.map { it.accountId }.toSet())
@@ -148,7 +153,7 @@ class UsageAggregationTest {
         byToken.forEach { (token, rows) -> assertSame(totalsOf(rows), perToken[token], "token $token") }
     }
 
-    @Test fun `the overview matches the single pass it replaced`() {
+    private fun checkOverview() {
         val limitDay = today.minus(Duration.ofHours(30))
         val rows = UsageRepo.overviewByUser(today, limitDay).associateBy { it.userId }
         assertEquals(events.map { it.user }.toSet(), rows.keys)
@@ -171,6 +176,103 @@ class UsageAggregationTest {
         }
     }
 
+    private fun checkDayBuckets() {
+        val window = events.filter { it.ts >= start && it.ts < end }
+        for (zone in listOf("UTC", "Europe/Paris", "Asia/Kolkata").map(ZoneId::of)) {
+            fun date(e: Event) = e.ts.atZone(zone).toLocalDate().toString()
+            fun <K> byKey(rows: List<Event>, key: (Event) -> K) = rows.groupBy(key).mapValues { totalsOf(it.value) }
+            val daily = UsageRepo.dailyBuckets(start, end, zone)
+            val expectedDaily = byKey(window.filter { owner[it.account] == null }) { it.account to date(it) }
+            assertEquals(expectedDaily.keys, daily.map { it.accountId to it.date }.toSet(), "daily $zone")
+            for (b in daily) {
+                val t = expectedDaily.getValue(b.accountId to b.date)
+                assertEquals(listOf(t.requests, t.clean), listOf(b.requests, b.tokens), "daily $zone")
+                assertEquals(t.cost, b.cost, 1e-6, "daily $zone")
+            }
+            for (source in listOf(null, "routing")) {
+                val mine = window.filter { it.user == alice && (source == null || it.source == source) }
+                val userDaily = UsageRepo.dailyBucketsForUser(alice, start, end, source, zone)
+                val expectedUser = byKey(mine) { it.account to date(it) }
+                assertEquals(expectedUser.keys, userDaily.map { it.accountId to it.date }.toSet(), "user daily $zone $source")
+                for (b in userDaily) {
+                    val t = expectedUser.getValue(b.accountId to b.date)
+                    assertEquals(listOf(t.requests, t.clean), listOf(b.requests, b.tokens)); assertEquals(t.cost, b.cost, 1e-6)
+                }
+                val userTokens = UsageRepo.tokenBucketsForUser(alice, start, end, source, zone)
+                val expectedTokens = byKey(mine) { Triple(it.account, it.model, date(it)) }
+                assertEquals(expectedTokens.keys, userTokens.map { Triple(it.accountId, it.model, it.date) }.toSet(), "user tokens $zone")
+                for (b in userTokens) {
+                    val t = expectedTokens.getValue(Triple(b.accountId, b.model, b.date))
+                    assertEquals(listOf(t.input, t.output, t.cacheRead, t.cacheWrite), listOf(b.input, b.output, b.cacheRead, b.cacheWrite))
+                }
+            }
+            val perToken = UsageRepo.tokenDailyBucketsForUser(bob, "proxy", start, end, zone)
+            val expectedPerToken = byKey(window.filter { it.user == bob && it.source == "proxy" }) { it.token to date(it) }
+            assertEquals(expectedPerToken.keys, perToken.map { it.tokenId to it.date }.toSet(), "token daily $zone")
+            for (b in perToken) {
+                val t = expectedPerToken.getValue(b.tokenId to b.date)
+                assertEquals(listOf(t.requests, t.clean), listOf(b.requests, b.tokens)); assertEquals(t.cost, b.cost, 1e-6)
+            }
+            val pooled = UsageRepo.tokenBuckets(start, end, zone)
+            val expectedPooled = byKey(window.filter { owner[it.account] == null }) { Triple(it.account, it.model, date(it)) }
+            assertEquals(expectedPooled.keys, pooled.map { Triple(it.accountId, it.model, it.date) }.toSet(), "pool tokens $zone")
+            for (b in pooled) {
+                val t = expectedPooled.getValue(Triple(b.accountId, b.model, b.date))
+                assertEquals(listOf(t.input, t.output, t.cacheRead, t.cacheWrite), listOf(b.input, b.output, b.cacheRead, b.cacheWrite))
+            }
+        }
+    }
+
+    private fun checkAll() {
+        checkUserTotals(); checkPerAccountAndPool(); checkAccountSets(); checkPerModel()
+        checkSummaryAndTokens(); checkOverview(); checkDayBuckets()
+    }
+
+    private fun hourlyRows() = transaction {
+        UsageHourly.selectAll().map { row -> UsageHourly.columns.map { row[it] } }.sortedBy { it.toString() }
+    }
+
+    @Test fun `the events alone answer every read`() = checkAll()
+
+    @Test fun `a rollup through the last closed hour answers the same`() {
+        UsageRollup.rollUp(now)
+        assertTrue(hourlyRows().isNotEmpty())
+        checkAll()
+    }
+
+    @Test fun `a rollup that stopped a day behind answers the same`() {
+        UsageRollup.rollUp(now.minus(Duration.ofHours(30)))
+        checkAll()
+    }
+
+    @Test fun `a second pass changes nothing`() {
+        UsageRollup.rollUp(now)
+        val first = hourlyRows()
+        val through = transaction { UsageRollup.through() }
+        UsageRollup.rollUp(now)
+        assertEquals(first, hourlyRows())
+        assertEquals(through, transaction { UsageRollup.through() })
+        assertEquals(now.truncatedTo(java.time.temporal.ChronoUnit.HOURS), through)
+    }
+
+    @Test fun `clearing a user and deleting one carry over to the rollup`() {
+        UsageRollup.rollUp(now)
+        UsageRepo.clearUser(bob)
+        events.removeAll { it.user == bob }
+        checkAll()
+        val aliceOwn = owner.filterValues { it == alice }.keys
+        UserRepo.delete(alice)
+        events.removeAll { it.account in aliceOwn }
+        aliceOwn.forEach(owner::remove)
+        val detached = events.map { if (it.user == alice) Event(it.account, null, it.ts, it.input, it.output, it.cacheRead, it.cacheWrite, it.cost, it.model, it.source, it.token) else it }
+        events.clear(); events.addAll(detached)
+        checkAll()
+        UsageRepo.clearAll()
+        events.clear()
+        assertEquals(emptyList(), hourlyRows())
+        checkAll()
+    }
+
     @Test fun `usage events are indexed by user for the daily limit check`() {
         val indexes = transaction {
             val names = mutableListOf<String>()
@@ -179,6 +281,6 @@ class UsageAggregationTest {
             }
             names
         }
-        assertTrue("usage_events_user_id_ts" in indexes, "indexes: $indexes")
+        assertTrue("usage_events_user_id_ts" in indexes && "usage_events_ts" in indexes, "indexes: $indexes")
     }
 }
